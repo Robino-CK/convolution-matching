@@ -35,7 +35,7 @@ class VariationNeighborhoods(GraphSummarizer):
     def summarize(self, out_directory: str, seed=None):
         start_time = time.time()
 
-        gsp_graph = pygsp.graphs.Graph(self.original_graph.adj(scipy_fmt="coo"))
+        gsp_graph = pygsp.graphs.Graph(self.original_graph.adj_external(scipy_fmt="coo"))
 
         components, coarse_matrix_list, coarse_graph_list = coarsening(gsp_graph, 1 - self.r, "variation_neighborhoods")
 
