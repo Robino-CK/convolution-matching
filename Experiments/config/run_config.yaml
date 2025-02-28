@@ -1,3 +1,13 @@
+KarateNodeClasssificationGCN: {
+  base_out_dir: results/nodeClassificationGraphSummarization,
+  splits: 5,
+  datasets: [ Karate ],
+  models: [ GCN ],
+  loss: [ NegativeLogLikelihood ],
+  optimizers: [ ADAM ],
+  graph_summarizers: [ NodeClassificationApproximateConvolutionMatchingSGCNCoarsener ]
+}
+
 OGBNProductsNodeClassificationGCN: {
   base_out_dir: results/nodeClassificationGraphSummarization,
   splits: 5,
@@ -38,6 +48,7 @@ CiteseerNodeClassificationGraphSummarization: {
   graph_summarizers: [ NodeClassificationApproximateConvolutionMatchingSGCNCoarsener, NodeClassificationConvolutionMatchingSGCNCoarsener,
                        HerdingSampler, KCenterSampler, VariationNeighborhoods, NodeClassificationGCond, NodeClassificationDosCond ]
 }
+
 
 CiteseerNodeClassificationPairsPerLevelAblation: {
   base_out_dir: results/nodeClassificationGraphSummarization,

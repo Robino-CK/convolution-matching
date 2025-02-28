@@ -1,3 +1,76 @@
+KarateNodeClasssificationGCN: {
+  model_params: {
+    GCN: {
+      n_layers: [ 3 ],
+      hidden_layer_sizes: [ 256 ],
+      use_layer_norm: [ True ],
+      use_edge_weights: [ False ],
+      use_input_layer: [ False ],
+      log_softmax: [ True ],
+      dropout: [ 0.5 ]
+    },
+  },
+  optimizer_params: {
+    ADAM: {
+      lr: [ 0.01 ],
+      weight_decay: [ 0.0 ]
+    }
+  },
+  graph_summarizer_params: {
+    NodeClassificationGCond: {
+      r: [ 0.001, 0.01 ],
+      dataset_name: [ "Karate" ],
+      lr_adj: [ 1.0e-4 ],
+      lr_feat: [ 1.0e-4 ],
+      lr_model: [ 1.0e-2 ],
+      n_epochs: [ 10 ],
+      dis_metric: [ "ours" ],
+      inner: [ 15 ],
+      outer: [ 20 ],
+      nlayers: [ 2 ],
+      one_step: [ 0 ],
+      sgc: [ 1 ],
+    },
+    NodeClassificationDosCond: {
+      r: [ 0.001, 0.01 ],
+      dataset_name: [ "Karate" ],
+      lr_adj: [ 1.0e-3 ],
+      lr_feat: [ 1.0e-3 ],
+      lr_model: [ 1.0e-2 ],
+      n_epochs: [ 50 ],
+      dis_metric: [ "mse" ],
+      inner: [ 0 ],
+      outer: [ 1 ],
+      nlayers: [ 2 ],
+      one_step: [ 1 ],
+      sgc: [ 0 ],
+    },
+    RandomNodeSampler: {
+      r: [ 0.001, 0.01 ]
+    },
+    HerdingSampler: {
+      r: [ 0.001, 0.01 ]
+    },
+    KCenterSampler: {
+      r: [ 0.001, 0.01 ]
+    },
+    VariationNeighborhoods: {
+      r: [ 0.001, 0.01 ]
+    },
+    NodeClassificationApproximateConvolutionMatchingSGCNCoarsener: {
+      pairs_per_level: [ 2 ],
+      num_hops: [ 2 ],
+      num_nearest_neighbors: [ 5 ],
+      top_k_nn: [ 1 ],
+      nearest_neighbors_keep_rate: [ 0.001 ],
+      knn_embedding_space_dim: [ 2 ],
+      r: [ 0.001, 0.01, 0.1 ]
+    }
+  }
+}
+
+
+
 OGBNProductsNodeClassificationGCN: {
   model_params: {
     GCN: {

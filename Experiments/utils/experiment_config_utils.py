@@ -9,6 +9,8 @@ from Datasets.LinkPrediction.OGBLCollab import OGBLCollab
 from Datasets.LinkPrediction.OGBLCitation2 import OGBLCitation2
 from Datasets.NodeClassification.Citeseer import Citeseer as CiteseerNodeClassification
 from Datasets.NodeClassification.Cora import Cora as CoraNodeClassification
+from Datasets.NodeClassification.Karate import Karate as KarateClubDataset
+
 from Datasets.NodeClassification.OGBNArxiv import OGBNArxiv
 from Datasets.NodeClassification.OGBNProducts import OGBNProducts
 
@@ -16,7 +18,8 @@ NODE_CLASSIFICATION_DATASETS = {
     "Citeseer": CiteseerNodeClassification,
     "Cora": CoraNodeClassification,
     "OGBNArxiv": OGBNArxiv,
-    "OGBNProducts": OGBNProducts
+    "OGBNProducts": OGBNProducts,
+    "Karate": KarateClubDataset
 }
 LINK_PREDICTION_DATASETS = {
     "Citeseer": CiteseerLinkPrediction,
