@@ -1,2 +1,4 @@
 .venv
 .venvconv
+__pycache__/
+results
