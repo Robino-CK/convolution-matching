@@ -214,7 +214,7 @@ class GCN(torch.nn.Module):
                         block = blocks[0]
 
                         # Copy the node representations that are needed for the layer to device.
-                        h = x["_N"][block.srcnodes["_N"].data["_ID"]].to(device)
+                        h = x["_N"].to(device)[block.srcnodes["_N"].data["_ID"].to(device)]
 
                         if self.use_input_layer and (i == 0):
                             h = torch.nn.functional.dropout(self.input_layer(h), p=self.dropout, training=self.training)

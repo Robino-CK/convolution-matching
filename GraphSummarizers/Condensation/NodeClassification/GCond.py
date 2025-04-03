@@ -125,7 +125,7 @@ class GCond(GraphSummarizer):
         start_time = time.time()
 
         features, original_adj, labels = (self.original_graph.ndata["feat"].to(self.device),
-                                 self.original_graph.adj().to(self.device),
+                                 self.original_graph.adj_external().to(self.device),
                                  self.original_graph.ndata["label"].to(self.device))
 
         feat_sub, adj_sub = self.get_sub_adj_feat(features)
