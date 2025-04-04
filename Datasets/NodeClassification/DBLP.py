@@ -8,7 +8,13 @@ import dgl
 import os
 import sys
 import torch
-
+from torch.serialization import add_safe_globals
+from torch_geometric.data import HeteroData
+from torch_geometric.data.graph_store import EdgeAttr
+from torch_geometric.data.storage import NodeStorage
+from torch_geometric.data.storage import BaseStorage
+from torch_geometric.data.storage import EdgeStorage
+import torch
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "../../"))
 
@@ -22,13 +28,19 @@ class DBLP():
    #     self.epochs = 600
 
     def load_graph(self) -> dgl.DGLGraph:
+        torch.serialization.add_safe_globals([HeteroData])
+        torch.serialization.safe_globals([HeteroData])
+        torch.serialization.add_safe_globals([EdgeAttr])
+        torch.serialization.add_safe_globals([torch_geometric.data.TensorAttr])
+        torch.serialization.add_safe_globals([BaseStorage])
+        torch.serialization.add_safe_globals([NodeStorage])
+        torch.serialization.add_safe_globals([EdgeStorage])
         
         # Load the dataset
         path = './dblp'
         dataset = torch_geometric.datasets.DBLP(path)
         data = dataset[0]  # Only one graph
 
-        node_types = ['author', 'paper', 'term', 'conference']  #
         num_nodes_dict = {
             'author': data.x_dict['author'].shape[0],
             'paper': data.x_dict['paper'].shape[0],
@@ -44,7 +56,7 @@ class DBLP():
         for (src_type, rel_type, dst_type), edge_index in edge_index_dict.items():
             src_nodes = edge_index[0].numpy()
             dst_nodes = edge_index[1].numpy()
-            edge_tuples[(src_type, rel_type, dst_type)] = (src_nodes, dst_nodes)
+            edge_tuples[(src_type, src_type + rel_type + dst_type, dst_type)] = (src_nodes, dst_nodes)
         # Create DGL heterograph
         g = heterograph(edge_tuples, num_nodes_dict=num_nodes_dict)
 
