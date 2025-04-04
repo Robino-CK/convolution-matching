@@ -5,10 +5,10 @@ import os
 import sys
 import time
 import torch
-
+import sklearn
 from abc import abstractmethod
 from tqdm import tqdm
-
+from sklearn.decomposition import PCA
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "../../"))
 from Datasets.Dataset import Dataset
@@ -17,11 +17,13 @@ from GraphSummarizers.GraphSummarizer import SUMMARY_GRAPH_FILENAME
 from GraphSummarizers.GraphSummarizer import SUMMARY_STATISTICS_FILENAME
 from GraphSummarizers.GraphSummarizer import ORIGINAL_TO_SUPER_NODE_FILENAME
 from Datasets.NodeClassification.DBLP import DBLP
+
+from dgl.dataloading import MultiLayerFullNeighborSampler, DataLoader
 from Datasets.NodeClassification.TestHetero import TestHeteroSmall, TestHeteroBig
 import dgl
 import torch
 from scipy.sparse import coo_matrix
-
+import scipy
 
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
@@ -45,13 +47,37 @@ class HeteroCoarsener(GraphSummarizer):
         self.node_types = dict()
         self.candidate_pairs = None
         self.homo_hetero_map = dict()
+        self.type_homo_mapping = dict()
+        self.init_node_info()
+        
+    
+    
+    def init_node_info(self):
+        
+        self.node_degrees = {}
+
+        for etype in self.coarsened_graph.etypes:
+            # Compute out-degrees for source nodes of this edge type
+            out_deg = self.coarsened_graph.out_degrees(etype=etype)
+            # Compute in-degrees for destination nodes of this edge type
+            in_deg = self.coarsened_graph.in_degrees(etype=etype)
+
+            # Store degrees per node per relation
+            self.node_degrees[etype] = {
+                'out': out_deg,
+                'in': in_deg
+            }
+            
+            #self.original_graph.nodes()
+        
     
     def _get_adjacency(self):
         # Assume `hg` is your DGL heterograph
         # Convert to homogeneous graph to get global node ID mapping
-        
+        print("hi")
         homo_g = dgl.to_homogeneous(self.coarsened_graph)
         N_total = homo_g.num_nodes()
+        
 
         adj_matrices = {}  # Store adjacency per edge type
 
@@ -59,12 +85,13 @@ class HeteroCoarsener(GraphSummarizer):
         offset = 0
         node_counts = {ntype: self.coarsened_graph.num_nodes(ntype) for ntype in self.coarsened_graph.ntypes}
         for ntype, count in node_counts.items():
+            self.type_homo_mapping[ntype] = (offset, count + offset)
             for i in range(offset, count +offset ):
                 self.node_types[i] = ntype
                 self.homo_hetero_map[i] = i - offset  
+                
             offset += count
-
-        
+        print("created mapping dict")
         for src_type, etype, dest_type in self.coarsened_graph.canonical_etypes :
             
             
@@ -73,25 +100,34 @@ class HeteroCoarsener(GraphSummarizer):
             self.total_number_of_nodes = dgl.to_homogeneous(self.coarsened_graph).number_of_nodes()
             # Build sparse adjacency matrix of shape [N_total, N_total]
             data = torch.ones(len(src_homo))
-            adj = coo_matrix((data.numpy(), (src_homo.numpy(), dst_homo.numpy())), shape=(N_total, N_total))
+            print("created I")
             
+            adj = coo_matrix((data.numpy(), (src_homo.numpy(), dst_homo.numpy())), shape=(N_total, N_total))
+            print("created coo_matrix")
                         
             values = adj.data
             indices = np.vstack((adj.row, adj.col))
+            print("v stack")
 
             i = torch.LongTensor(indices)
+            print("created i")
             v = torch.FloatTensor(values)
+            print("created v")
             shape = adj.shape
 
-            adj_torch =  torch.sparse.FloatTensor(i, v, torch.Size(shape)).to_dense()
-            
+            adj_torch =  torch.sparse.FloatTensor(i, v, torch.Size(shape)).to_dense().to("cuda:0")
+            print("adj torch ")
             adj_matrices[etype] = adj_torch + torch.transpose(adj_torch, 0, 1)
+        
+        print("created all adj")
         return adj_matrices
     
     
     def _rgcn_layer(self,k): 
         # no self loops yet!
+        
         adj = self._get_adjacency()
+        print("get adj")
         H = dict()
         H_total = None
         for etype in self.coarsened_graph.etypes:
@@ -109,9 +145,50 @@ class HeteroCoarsener(GraphSummarizer):
         
         return H_total        
 
+    def _create_h_spatial_rgcn(self):
+        self.H = dict()
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            degree = torch.tensor(self.node_degrees[etype]["out"]) 
+            degree_inv_src = 1/torch.sqrt(degree)
+            degree = torch.tensor(self.node_degrees[etype]["in"]) 
+            degree_inv_dest = 1/torch.sqrt(degree)
+            self.H[etype] = dict()
+            for node in self.coarsened_graph.nodes(src_type):
+                neighbors = self.coarsened_graph.successors(node, etype=(src_type, etype, dst_type))
+                self.H[etype][node.item()] = torch.zeros(self.coarsened_graph.nodes[dst_type].data["feat"].shape[1])
+                for neigh in neighbors:
+                    self.H[etype][node.item()] += degree_inv_src[node] * degree_inv_dest[neigh] * self.coarsened_graph.nodes[dst_type].data["feat"][neigh]
+    
+    
+    
+    def _init_candidates_spatial(self):
+        init_costs = dict()
+        
+        
+        print("start init costs")
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            if not src_type in init_costs:
+                init_costs[src_type] = dict()    
+            H = torch.zeros(( len(self.coarsened_graph.nodes(src_type)),  self.coarsened_graph.nodes[dst_type].data["feat"].shape[1]))
+            for node in self.coarsened_graph.nodes(src_type):
+                
+                H[node.item(),:] = self.H[etype][node.item()]
+            pca = PCA(n_components=3)
+            reduced_structural_embedding = pca.fit_transform(
+            (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
+             )   
+            kd_tree = scipy.spatial.KDTree(reduced_structural_embedding)
+            distances, nearest_neighbors =  kd_tree.query(reduced_structural_embedding, k=2, p=1, eps=0.01, workers=1)
+            print(nearest_neighbors)
+        return init_costs
+                        
+                    
+         
 
     def _init_candidates(self):
+        
         H_total = self._rgcn_layer(2)
+        
         # Get the top-k pairs of nodes to merge
         top_k_pairs = []
         for i in range(H_total.shape[0]):
@@ -133,11 +210,11 @@ class HeteroCoarsener(GraphSummarizer):
         self.candidate_pairs = top_k_no_overlap
         #top_k_pairs = top_k_pairs[:self.pairs_per_level]
        # return top_k_no_overlap
-    def _get_partitioning(self, u,v):
-        P = torch.eye(self.total_number_of_nodes)
-        P = np.delete(P, self.total_number_of_nodes - 1, axis=1)
+    def _get_partitioning(self, u,v , number_of_nodes):
+        P = torch.eye(number_of_nodes)
+        P = np.delete(P, number_of_nodes - 1, axis=1)
         P[u,v] = 1
-        if not u == self.total_number_of_nodes - 1:
+        if not u == number_of_nodes - 1:
             P[u,u] = 0
             P[-1, u]  = 1  
         return P
@@ -220,15 +297,6 @@ class HeteroCoarsener(GraphSummarizer):
 
         return new_graph
 
-        
-    def _merge_nodes_asd(self, node1, node2):
-        # Merge the nodes in the graph
-        self.coarsened_graph = dgl.merge_nodes(self.coarsened_graph, [node1, node2])
-        P = self._get_partitioning(node1, node2)
-        # Update the node mapping
-        new_node = self.coarsened_graph.num_nodes() - 1
-        self.node_mapping[new_node] = (node1, node2)
-        return  P
     
     def _merge(self):
         copy_graph = self.coarsened_graph.clone()
@@ -236,19 +304,26 @@ class HeteroCoarsener(GraphSummarizer):
         H_real = self._rgcn_layer(2)
         for node1, node2 in self.candidate_pairs.keys():
             self.coarsened_graph = copy_graph.clone()
-            g = self._merge_nodes_hetero(self.coarsened_graph.clone(), [self.homo_hetero_map[node1], self.homo_hetero_map[node2]], self.node_types[node1])
-            self.coarsend_graph = g
+            ntype = self.node_types[node1]
+            g = self._merge_nodes_hetero(self.coarsened_graph.clone(), [self.homo_hetero_map[node1], self.homo_hetero_map[node2]], ntype)
+            self.coarsened_graph = g
             H_coarsen = self._rgcn_layer(2)
             
-            P = self._get_partitioning(node1, node2)
-            costs = 0
-            for ntype in self.coarsened_graph.ntypes:
-                X_coarsen = self.coarsened_graph.nodes[ntype].data["feat"]
-                X_real = copy_graph.nodes[ntype].data["feat"]
-                print(P.T@ H_coarsen  @ X_coarsen  )
-                costs = torch.norm(P.T@ H_coarsen  @ X_coarsen - H_real @ X_real, 2)
-                print(costs)
-                continue
+            P = self._get_partitioning(self.homo_hetero_map[node1], self.homo_hetero_map[node2], len(self.coarsened_graph.nodes(self.node_types[node1])) + 1)
+            
+            
+            X_coarsen = g.nodes[ntype].data["feat"]
+            X_real = copy_graph.nodes[ntype].data["feat"]
+            start = self.type_homo_mapping[self.node_types[node1]][0]
+            end = self.type_homo_mapping[self.node_types[node1]][1]
+            H_coarsen = H_coarsen[start:end -1, start:end -1]
+           
+           # P = P[start:end-1, start:end - 1]
+            H_real_selected = H_real[start:end, start:end]
+            
+            costs = torch.norm(P@ H_coarsen  @ X_coarsen - H_real_selected @ X_real, 2)
+            
+            
 
     
     def summarize(self):
@@ -259,10 +334,14 @@ class HeteroCoarsener(GraphSummarizer):
         
         
 
-#dataset = DBLP() 
-#original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
 test = TestHeteroSmall().load_graph()
+
 test = TestHeteroBig().load_graph()
-coarsener = HeteroCoarsener(None, test, 0.5)
-coarsener._init_candidates()
-coarsener._merge()
+
+coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+coarsener._create_h_spatial_rgcn()
+print(coarsener._init_candidates_spatial())
+print("hi")
+#coarsener._merge()

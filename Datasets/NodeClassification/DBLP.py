@@ -29,7 +29,7 @@ class DBLP():
 
     def load_graph(self) -> dgl.DGLGraph:
         torch.serialization.add_safe_globals([HeteroData])
-        torch.serialization.safe_globals([HeteroData])
+        torch.serialization.add_safe_globals([HeteroData])
         torch.serialization.add_safe_globals([EdgeAttr])
         torch.serialization.add_safe_globals([torch_geometric.data.TensorAttr])
         torch.serialization.add_safe_globals([BaseStorage])
@@ -63,9 +63,10 @@ class DBLP():
         # You can also assign features
         for ntype in g.ntypes:
             if ntype == "conference":
-                continue
+                g.nodes[ntype].data['feat'] = torch.ones(num_nodes_dict['conference'],1)    
             #if 'x' in data.x_dict[ntype]:
-            g.nodes[ntype].data['feat'] = data.x_dict[ntype]
+            else:
+                g.nodes[ntype].data['feat'] = data.x_dict[ntype]
         
         return g
 
