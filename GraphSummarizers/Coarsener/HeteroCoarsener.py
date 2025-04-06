@@ -24,7 +24,7 @@ import dgl
 import torch
 from scipy.sparse import coo_matrix
 import scipy
-
+from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
@@ -232,18 +232,15 @@ class HeteroCoarsener(GraphSummarizer):
                     print(costs)
                     
                     
-    def _merge_all(self, merge_list):
+    def _merge_all_paper(self, merge_list):
         merge_graph = self.coarsened_graph.clone()
-        for node_type, merge_candidates in merge_list.items():
-            merge_list = []
-            for i in tqdm(range(len(merge_candidates)), "start smth"):
-                node1, node2 = merge_candidates[i][0], merge_candidates[i][1]
-                changed_count_1 = len([i for i in merge_list if i < node1 ])
-                changed_count_2 = len([i for i in merge_list if i < node2 ])
-
-                merge_graph = self._merge_nodes_hetero(merge_graph, [node1 - changed_count_1, node2 - changed_count_2], node_type)
-                merge_list.append(node1)
-                merge_list.append(node2)
+        
+        #for node_type, merge_candidates in merge_list.items():
+        #    merge_list = []
+        node_type = "paper"
+        merge_candidates = merge_list["paper"]
+        merge_graph , _ = self.merge_node_pairs(merge_graph,node_type, merge_candidates)
+            
                
         return merge_graph
        
@@ -255,7 +252,94 @@ class HeteroCoarsener(GraphSummarizer):
             P[u,u] = 0
             P[-1, u]  = 1  
         return P
-            
+    
+    def _merge_nodes_213(self, g, node_type, node_pairs, feat_key="feat"):
+        g = deepcopy(g)
+        node_tesnor = g.nodes(ntype=node_type)
+        feature_tensor = g.nodes[node_type].data[feat_key]
+        edges=dict()
+        
+        mapping = torch.arange(1, g.num_nodes(ntype=node_type))
+        
+        for i, node1, node2 in enumerate(node_pairs):
+            for src_type, etype,_ in g.canonical_etypes:
+                adj = g.adj(etype=etype)
+                if src_type != node_type:
+                    continue
+                edges = adj[mapping[node1], :] + adj[mapping[node2],:]                    
+
+            feature = feature_tensor[node1] + feature_tensor[node2] / 2
+            edges = []
+                
+    def merge_node_pairs(self,g, node_type, node_pairs, feat_key='feat'):
+        """
+        Merge multiple node pairs in a heterogeneous DGL graph.
+
+        Args:
+            g (dgl.DGLHeteroGraph): The input graph.
+            node_type (str): The node type of the nodes to merge.
+            node_pairs (list of tuple): List of (node1, node2) pairs to merge.
+            feat_key (str): The feature key to average.
+
+        Returns:
+            new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
+            mapping (dict): Mapping from original node IDs to supernode ID.
+        """
+        g = deepcopy(g)
+
+        original_to_super = {}
+        current_num_nodes = g.num_nodes(node_type)
+        feat_data = g.nodes[node_type].data[feat_key]
+        device = feat_data.device
+
+        # Step 1: Create supernodes and average features
+        new_feats = []
+        for node1, node2 in node_pairs:
+            assert node1 != node2, "Cannot merge a node with itself."
+            assert node1 in g.nodes(node_type) and node2 in g.nodes(node_type), "Node not in graph."
+
+            feat1 = feat_data[node1]
+            feat2 = feat_data[node2]
+            super_feat = (feat1 + feat2) / 2
+            new_feats.append(super_feat)
+
+            supernode_id = current_num_nodes
+            current_num_nodes += 1
+
+            original_to_super[int(node1)] = supernode_id
+            original_to_super[int(node2)] = supernode_id
+
+        # Step 2: Add supernodes
+        g.add_nodes(len(new_feats), ntype=node_type)
+        g.nodes[node_type].data[feat_key] = torch.cat([feat_data, torch.stack(new_feats).to(device)], dim=0)
+
+        # Step 3: Redirect edges for each canonical edge type
+        for srctype, etype, dsttype in g.canonical_etypes:
+            src, dst = g.edges(etype=(srctype, etype, dsttype))
+            src = src.tolist()
+            dst = dst.tolist()
+            new_src = []
+            new_dst = []
+
+            for s, d in zip(src, dst):
+                if srctype == node_type and s in original_to_super:
+                    s = original_to_super[s]
+                if dsttype == node_type and d in original_to_super:
+                    d = original_to_super[d]
+                new_src.append(s)
+                new_dst.append(d)
+
+            # Remove old edges and add updated edges
+            g.remove_edges(torch.arange(g.num_edges((srctype, etype, dsttype))), etype=(srctype, etype, dsttype))
+            g.add_edges(new_src, new_dst, etype=(srctype, etype, dsttype))
+
+        # Step 4: Simulate removal by masking features
+        to_remove = torch.tensor(list(original_to_super.keys()), dtype=torch.long, device=device)
+        mask = torch.ones(g.num_nodes(node_type), dtype=torch.bool, device=device)
+        mask[to_remove] = False
+        g.nodes[node_type].data[feat_key] = g.nodes[node_type].data[feat_key][mask]
+
+        return g, original_to_super
 
 
     def _merge_nodes_hetero(self, g, node_ids_to_merge, node_type):
@@ -345,22 +429,10 @@ class HeteroCoarsener(GraphSummarizer):
     def _merge_new():
         
         pass
-        
-        
-
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+    
 test = TestHeteroSmall().load_graph()
 
-test = TestHeteroBig().load_graph()
+         
 
-coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
-
-H = coarsener._create_h_spatial_rgcn(original_graph)
-candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
-merged_graph = coarsener._merge_all(candidates)
-print(merged_graph)
-print(original_graph)
-#coarsener._costs_of_merges(candidates)
-
-#coarsener._merge()
+coarsener = HeteroCoarsener(None, test, 0.5)
+coarsener._merge_nodes_213(test, "author", [[0,1]])
