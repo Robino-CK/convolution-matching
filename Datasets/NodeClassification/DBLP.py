@@ -67,6 +67,8 @@ class DBLP():
             #if 'x' in data.x_dict[ntype]:
             else:
                 g.nodes[ntype].data['feat'] = data.x_dict[ntype]
-        
+        g.nodes["author"].data['label'] = data["author"].y
+        self.features = data.x_dict
+        self.dataset = data
         return g
 

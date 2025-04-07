@@ -253,7 +253,7 @@ class HeteroCoarsener(GraphSummarizer):
             P[-1, u]  = 1  
         return P
     
-    def _merge_nodes_213(self, g, node_type, node_pairs):
+    def _merge_nodes(self, g, node_type, node_pairs):
         """
         Merge multiple node pairs in a heterogeneous DGL graph.
 
@@ -319,23 +319,23 @@ class HeteroCoarsener(GraphSummarizer):
     
     
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
 
-test = TestHeteroSmall().load_graph()
+# test = TestHeteroSmall().load_graph()
 
-test = TestHeteroBig().load_graph()
+# test = TestHeteroBig().load_graph()
 
-coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+# coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
 
 
-H = coarsener._create_h_spatial_rgcn(original_graph)
-candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
-merged_graph = coarsener._merge_nodes_213(original_graph, "author", candidates["author"])
-test = TestHeteroSmall().load_graph()
+# H = coarsener._create_h_spatial_rgcn(original_graph)
+# candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
+# merged_graph = coarsener._merge_nodes(original_graph, "author", candidates["author"])
+# test = TestHeteroSmall().load_graph()
 
          
 
-coarsener = HeteroCoarsener(None, test, 0.5)
-coarsener._merge_nodes_213(test, "author", [(0,2), (1,3)])
+# coarsener = HeteroCoarsener(None, test, 0.5)
+# coarsener._merge_nodes(test, "author", [(0,2), (1,3)])

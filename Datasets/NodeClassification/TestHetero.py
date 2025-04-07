@@ -13,12 +13,12 @@ class TestHeteroSmall():
         # Define edges: (source_nodes, destination_nodes)
         # Author 0 writes Paper 0, Author 1 writes Paper 1 and 2, Author 2 writes Paper 0
         author_ids = {
-            'writes': torch.tensor([0, 1, 1, 2]),  # authors
-            'written_by': torch.tensor([0, 1, 2, 0])  # papers
+            'writes': torch.tensor([0, 1, 1, 2,3]),  # authors
+            'written_by': torch.tensor([0, 1, 2, 0,1])  # papers
         }
         paper_ids = {
-            'writes': torch.tensor([0, 1, 2, 0]),  # papers
-            'written_by': torch.tensor([0, 1, 1, 2])  # authors
+            'writes': torch.tensor([0, 1, 2, 0,1]),  # papers
+            'written_by': torch.tensor([0, 1, 1, 2,3])  # authors
         }
 
         # Create the heterograph
@@ -26,6 +26,9 @@ class TestHeteroSmall():
             ('author', 'writes', 'paper'): (author_ids['writes'], paper_ids['writes']),
             ('paper', 'written_by', 'author'): (paper_ids['written_by'], author_ids['written_by'])
         })
+        
+        for ntype in hetero_graph.ntypes:
+            hetero_graph.nodes[ntype].data["feat"] = torch.ones(hetero_graph.num_nodes(ntype),1) 
         return hetero_graph
     
     
