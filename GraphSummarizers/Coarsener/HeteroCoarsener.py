@@ -253,25 +253,7 @@ class HeteroCoarsener(GraphSummarizer):
             P[-1, u]  = 1  
         return P
     
-    def _merge_nodes_213(self, g, node_type, node_pairs, feat_key="feat"):
-        g = deepcopy(g)
-        node_tesnor = g.nodes(ntype=node_type)
-        feature_tensor = g.nodes[node_type].data[feat_key]
-        edges=dict()
-        
-        mapping = torch.arange(1, g.num_nodes(ntype=node_type))
-        
-        for i, node1, node2 in enumerate(node_pairs):
-            for src_type, etype,_ in g.canonical_etypes:
-                adj = g.adj(etype=etype)
-                if src_type != node_type:
-                    continue
-                edges = adj[mapping[node1], :] + adj[mapping[node2],:]                    
-
-            feature = feature_tensor[node1] + feature_tensor[node2] / 2
-            edges = []
-                
-    def merge_node_pairs(self,g, node_type, node_pairs, feat_key='feat'):
+    def _merge_nodes_213(self, g, node_type, node_pairs):
         """
         Merge multiple node pairs in a heterogeneous DGL graph.
 
@@ -285,140 +267,44 @@ class HeteroCoarsener(GraphSummarizer):
             new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
             mapping (dict): Mapping from original node IDs to supernode ID.
         """
+       
         g = deepcopy(g)
-
-        original_to_super = {}
-        current_num_nodes = g.num_nodes(node_type)
-        feat_data = g.nodes[node_type].data[feat_key]
-        device = feat_data.device
-
-        # Step 1: Create supernodes and average features
-        new_feats = []
+        
+        mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
+        
         for node1, node2 in node_pairs:
-            assert node1 != node2, "Cannot merge a node with itself."
-            assert node1 in g.nodes(node_type) and node2 in g.nodes(node_type), "Node not in graph."
-
-            feat1 = feat_data[node1]
-            feat2 = feat_data[node2]
-            super_feat = (feat1 + feat2) / 2
-            new_feats.append(super_feat)
-
-            supernode_id = current_num_nodes
-            current_num_nodes += 1
-
-            original_to_super[int(node1)] = supernode_id
-            original_to_super[int(node2)] = supernode_id
-
-        # Step 2: Add supernodes
-        g.add_nodes(len(new_feats), ntype=node_type)
-        g.nodes[node_type].data[feat_key] = torch.cat([feat_data, torch.stack(new_feats).to(device)], dim=0)
-
-        # Step 3: Redirect edges for each canonical edge type
-        for srctype, etype, dsttype in g.canonical_etypes:
-            src, dst = g.edges(etype=(srctype, etype, dsttype))
-            src = src.tolist()
-            dst = dst.tolist()
-            new_src = []
-            new_dst = []
-
-            for s, d in zip(src, dst):
-                if srctype == node_type and s in original_to_super:
-                    s = original_to_super[s]
-                if dsttype == node_type and d in original_to_super:
-                    d = original_to_super[d]
-                new_src.append(s)
-                new_dst.append(d)
-
-            # Remove old edges and add updated edges
-            g.remove_edges(torch.arange(g.num_edges((srctype, etype, dsttype))), etype=(srctype, etype, dsttype))
-            g.add_edges(new_src, new_dst, etype=(srctype, etype, dsttype))
-
-        # Step 4: Simulate removal by masking features
-        to_remove = torch.tensor(list(original_to_super.keys()), dtype=torch.long, device=device)
-        mask = torch.ones(g.num_nodes(node_type), dtype=torch.bool, device=device)
-        mask[to_remove] = False
-        g.nodes[node_type].data[feat_key] = g.nodes[node_type].data[feat_key][mask]
-
-        return g, original_to_super
-
-
-    def _merge_nodes_hetero(self, g, node_ids_to_merge, node_type):
-        """
-        Merges a list of nodes in a heterograph (all from the same node_type).
-        
-        Args:
-            g: dgl.DGLHeteroGraph
-            node_ids_to_merge: list or tensor of node IDs (same type)
-            node_type: str, the type of nodes to merge
-
-        Returns:
-            A new DGLHeteroGraph with merged node and reindexed nodes.
-        """
-        node_ids_to_merge = torch.tensor(node_ids_to_merge)
-        new_graph = copy.deepcopy(g)  # Work on a copy to preserve the original
-
-        # 1. Compute new features (average) and label (first one)
-        feat = new_graph.nodes[node_type].data['feat'][node_ids_to_merge]
-        new_feat = feat.mean(dim=0, keepdim=True)
-        
-        has_label = 'label' in new_graph.nodes[node_type].data
-        if has_label:
-            label = new_graph.nodes[node_type].data['label'][node_ids_to_merge[0]].unsqueeze(0)
-
-        # 2. Get all edges involving any of the nodes to be merged
-        new_edges = {}
-        for etype in new_graph.canonical_etypes:
-            src_type, edge_name, dst_type = etype
-            src, dst = new_graph.edges(etype=etype)
-
-            # Replace source
-            src_mask = (src_type == node_type) & (src.unsqueeze(1) == node_ids_to_merge).any(dim=1)
-            dst_mask = (dst_type == node_type) & (dst.unsqueeze(1) == node_ids_to_merge).any(dim=1)
-
-            src = src.clone()
-            dst = dst.clone()
-            
-            # Replace all node_ids_to_merge with a new placeholder ID: temp max id
-            new_id = new_graph.num_nodes(node_type)
-            if src_type == node_type:
-                src[src_mask] = new_id
-            if dst_type == node_type:
-                dst[dst_mask] = new_id
-            
-            new_edges[etype] = (src, dst)
-
-        # 3. Remove the old graph
-        # Create a new graph with one extra node for the merged node
-        num_nodes_dict = {ntype: new_graph.num_nodes(ntype) for ntype in new_graph.ntypes}
-        num_nodes_dict[node_type] += 1  #- len(node_ids_to_merge)  # remove merged nodes, add one
-      #  print(new_edges)
-        new_graph = dgl.heterograph(new_edges, num_nodes_dict)
-        new_graph = dgl.remove_nodes(new_graph, node_ids_to_merge, ntype=node_type)
-       # print(new_graph)
-        # 4. Set new node features
-        for ntype in new_graph.ntypes:
-            if not "feat" in g.nodes[ntype].data:
-                continue
-            n = new_graph.num_nodes(ntype)
-            old_feats = g.nodes[ntype].data['feat']
-            if ntype == node_type:
-                # Exclude merged nodes, then add the new feature
-                keep_mask = torch.ones(old_feats.shape[0], dtype=torch.bool)
-                keep_mask[node_ids_to_merge] = False
-                feats = torch.cat([old_feats[keep_mask], new_feat], dim=0)
-            else:
-                feats = old_feats
-            new_graph.nodes[ntype].data['feat'] = feats
-
-            # Handle labels
-            if has_label and ntype == node_type:
-                old_labels = g.nodes[ntype].data['label']
-                labels = torch.cat([old_labels[keep_mask], label], dim=0)
-                new_graph.nodes[ntype].data['label'] = labels
-
-        return new_graph
-
-
+            for src_type, etype,dst_type in g.canonical_etypes:
+                if src_type != node_type:
+                    continue
+                edges_original = g.edges(etype=etype)
+                mask_node1 =  torch.where(edges_original[0] == mapping[node1], True, False)
+                mask_node2 =  torch.where(edges_original[0] == mapping[node2], True, False)
+                mask = torch.logical_or(mask_node1, mask_node2)
+                edges_dst = torch.unique(edges_original[1][mask])
+                new_node_id =  g.num_nodes(ntype=src_type)
+                edges_src = torch.full(edges_dst.shape,new_node_id )
+                g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                if "feat" in g.nodes[src_type].data:
+                    old_feats = g.nodes[src_type].data["feat"] 
+                    g.nodes[src_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] + old_feats[mapping[node2]]) / 2
+                if "label" in g.nodes[src_type].data:
+                    g.nodes[src_type].data["label"][new_node_id] = g.nodes[src_type].data["label"][mapping[node1]] 
+                pre_node1 = mapping[node1].item()
+                pre_node2 = mapping[node2].item()
+                mapping[node1] = new_node_id  
+                mapping[node2] = new_node_id
+                
+                if node1 > node2:
+                    mapping = torch.where(mapping >pre_node1, mapping -1, mapping)
+                    mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
+                else:
+                    mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
+                    mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
+                
+                g.remove_nodes([pre_node1, pre_node2], ntype=src_type)
+                
+        return g, mapping     
+   
 
 
     
@@ -430,9 +316,26 @@ class HeteroCoarsener(GraphSummarizer):
         
         pass
     
+    
+    
+
+dataset = DBLP() 
+original_graph = dataset.load_graph()
+
+
+test = TestHeteroSmall().load_graph()
+
+test = TestHeteroBig().load_graph()
+
+coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+
+
+H = coarsener._create_h_spatial_rgcn(original_graph)
+candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
+merged_graph = coarsener._merge_nodes_213(original_graph, "author", candidates["author"])
 test = TestHeteroSmall().load_graph()
 
          
 
 coarsener = HeteroCoarsener(None, test, 0.5)
-coarsener._merge_nodes_213(test, "author", [[0,1]])
+coarsener._merge_nodes_213(test, "author", [(0,2), (1,3)])
