@@ -67,6 +67,24 @@ class HeteroCoarsener(GraphSummarizer):
                 'out': out_deg,
                 'in': in_deg
             }
+        
+    def _create_h_spectral_rgcn(self, g):
+        # TODO: no normalization :// 
+        H = dict()
+        start_time = time.time()
+        for src_type, etype, dst_type in g.canonical_etypes:
+            
+            adj = g.adj_external(etype=etype)
+            d_src = torch.pow(torch.diag(adj.sum(axis=0).to_dense()),-0.5) 
+            d_inv_sqrt_src = torch.where(d_src == float("inf"), d_src, torch.tensor(0.0))
+            d_dst = torch.pow(torch.diag(adj.sum(axis=1).to_dense()),-0.5)
+            d_inv_sqrt_dst = torch.where(d_dst == float("inf"), d_dst, torch.tensor(0.0))
+            
+            H[etype] =  d_inv_sqrt_dst@ adj @ d_inv_sqrt_src
+            H[etype] = H[etype].to_dense()
+
+        print("created H", time.time() - start_time)
+        return H
             
     def _create_h_spatial_rgcn_for_node(self, g, node, node_type):
         h = dict()
@@ -85,7 +103,6 @@ class HeteroCoarsener(GraphSummarizer):
                 h[etype] += degree_inv_src[node] * degree_inv_dest[neigh] * g.nodes[dst_type].data["feat"][neigh]
         return h
 
-    
 
 
     def _create_h_spatial_rgcn(self, g):
@@ -103,10 +120,8 @@ class HeteroCoarsener(GraphSummarizer):
             degree_inv_dest = degree_inv_dest.to(device)
             H[etype] = dict()
             all_nodes = g.nodes(src_type)
-            g.adj(etype)
             #H[etype] = 
             for node in all_nodes:
-                start_3 = time.time()
                 neighbors = g.successors(node, etype=(src_type, etype, dst_type))
                 H[etype][node.item()] = torch.zeros(features.shape[1], device=device)
                 
@@ -362,10 +377,11 @@ dataset = DBLP()
 original_graph = dataset.load_graph()
 
 
-test = TestHeteroSmall().load_graph()
+#test = TestHeteroSmall().load_graph()
 
-test = TestHeteroBig().load_graph()
+# test = TestHeteroBig().load_graph()
 
 coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
 
-coarsener.summarize(original_graph)
+coarsener._create_h_spectral_rgcn(original_graph)
+# coarsener.summarize(original_graph)
