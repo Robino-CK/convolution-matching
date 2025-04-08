@@ -19,6 +19,8 @@ from GraphSummarizers.GraphSummarizer import ORIGINAL_TO_SUPER_NODE_FILENAME
 from Datasets.NodeClassification.DBLP import DBLP
 from tqdm import tqdm
 from dgl.dataloading import MultiLayerFullNeighborSampler, DataLoader
+from Datasets.NodeClassification.AIFB import AIFB
+
 from Datasets.NodeClassification.TestHetero import TestHeteroSmall, TestHeteroBig
 import dgl
 import torch
@@ -91,6 +93,7 @@ class HeteroCoarsener(GraphSummarizer):
         
             
         for src_type, etype, dst_type in g.canonical_etypes:
+            is_features = "feat" in g.nodes[dst_type].data
             if node_type != src_type:
                 continue
             degree = torch.tensor(self.node_degrees[etype]["out"]) 
@@ -98,9 +101,15 @@ class HeteroCoarsener(GraphSummarizer):
             degree = torch.tensor(self.node_degrees[etype]["in"]) 
             degree_inv_dest = 1/torch.sqrt(degree)
             neighbors = g.successors(node, etype=(src_type, etype, dst_type))
-            h[etype] = torch.zeros(g.nodes[dst_type].data["feat"].shape[1])
+            if is_features:
+                h[etype] = torch.zeros(g.nodes[dst_type].data["feat"].shape[1])
+            else:
+                h[etype] = torch.zeros(1)
             for neigh in neighbors:
-                h[etype] += degree_inv_src[node] * degree_inv_dest[neigh] * g.nodes[dst_type].data["feat"][neigh]
+                if is_features:
+                    h[etype] += degree_inv_src[node] * degree_inv_dest[neigh] * g.nodes[dst_type].data["feat"][neigh]
+                else:
+                    h[etype] += degree_inv_src[node] * degree_inv_dest[neigh] 
         return h
 
 
@@ -110,24 +119,31 @@ class HeteroCoarsener(GraphSummarizer):
         print("start create H")
         H = dict()
         device = "cpu"
+        
         for src_type, etype, dst_type in g.canonical_etypes:
+            is_features = "feat" in g.nodes[dst_type].data
             degree = torch.tensor(self.node_degrees[etype]["out"]).to(device)
             degree_inv_src = 1/torch.sqrt(degree)
             degree_inv_src = degree_inv_src.to(device)
             degree = torch.tensor(self.node_degrees[etype]["in"]).to(device)
             degree_inv_dest = 1/torch.sqrt(degree)
-            features = g.nodes[dst_type].data["feat"].to(device)
+            if is_features:
+                features = g.nodes[dst_type].data["feat"].to(device)
             degree_inv_dest = degree_inv_dest.to(device)
             H[etype] = dict()
             all_nodes = g.nodes(src_type)
             #H[etype] = 
             for node in all_nodes:
                 neighbors = g.successors(node, etype=(src_type, etype, dst_type))
-                H[etype][node.item()] = torch.zeros(features.shape[1], device=device)
-                
+                if is_features:
+                    H[etype][node.item()] = torch.zeros(features.shape[1], device=device)
+                else:
+                    H[etype][node.item()] = torch.zeros(1, device=device)
                 for neigh in neighbors:
-                    feat = features[neigh]
-                    
+                    if is_features:
+                        feat = features[neigh]
+                    else:
+                        feat = torch.tensor(1.0, device=device)
                     #feat = feat.to(device)
                     H[etype][node.item()] += degree_inv_src[node] * degree_inv_dest[neigh] * feat
                 
@@ -143,12 +159,15 @@ class HeteroCoarsener(GraphSummarizer):
         
         self.nearest_neighbors_keep_rate = 0.1
         self.top_k_nn = 3
-        self.num_nearest_neighbors = 3
+        self.num_nearest_neighbors = 50
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if not src_type in init_costs:
                 init_costs[src_type] = dict()    
-            H = torch.zeros(( len(self.coarsened_graph.nodes(src_type)),  self.coarsened_graph.nodes[dst_type].data["feat"].shape[1]))
+            if "feat" in self.coarsened_graph.nodes[dst_type].data:
+                H = torch.zeros(( len(self.coarsened_graph.nodes(src_type)),  self.coarsened_graph.nodes[dst_type].data["feat"].shape[1]))
+            else:
+                H = torch.zeros(( len(self.coarsened_graph.nodes(src_type)), 1))
             for node in self.coarsened_graph.nodes(src_type):
                 
                 H[node.item(),:] = H_normal[etype][node.item()]
@@ -259,13 +278,13 @@ class HeteroCoarsener(GraphSummarizer):
             new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
             mapping (dict): Mapping from original node IDs to supernode ID.
         """
-        start_time = time.time()
-      #  print("start merging nodes")
         g = deepcopy(g)
         
         mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
         
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
+            new_node_id =  g.num_nodes(ntype=node_type)
+            dgl.add_nodes(g, new_node_id, ntype=node_type)
             for src_type, etype,dst_type in g.canonical_etypes:
                 if src_type != node_type:
                     continue
@@ -274,28 +293,31 @@ class HeteroCoarsener(GraphSummarizer):
                 mask_node2 =  torch.where(edges_original[0] == mapping[node2], True, False)
                 mask = torch.logical_or(mask_node1, mask_node2)
                 edges_dst = torch.unique(edges_original[1][mask])
-                new_node_id =  g.num_nodes(ntype=src_type)
                 edges_src = torch.full(edges_dst.shape,new_node_id )
                 g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
-                if "feat" in g.nodes[src_type].data:
-                    old_feats = g.nodes[src_type].data["feat"] 
-                    g.nodes[src_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] + old_feats[mapping[node2]]) / 2
-                if "label" in g.nodes[src_type].data:
-                    g.nodes[src_type].data["label"][new_node_id] = g.nodes[src_type].data["label"][mapping[node1]] 
-                pre_node1 = mapping[node1].item()
-                pre_node2 = mapping[node2].item()
-                mapping[node1] = new_node_id  
-                mapping[node2] = new_node_id
+            
+            
+            if "feat" in g.nodes[node_type].data:
+                old_feats = g.nodes[node_type].data["feat"] 
+                g.nodes[node_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] + old_feats[mapping[node2]]) / 2
+            if "label" in g.nodes[node_type].data:
+                g.nodes[node_type].data["label"][new_node_id] = g.nodes[node_type].data["label"][mapping[node1]]
                 
-                if node1 > node2:
-                    mapping = torch.where(mapping >pre_node1, mapping -1, mapping)
-                    mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
-                else:
-                    mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
-                    mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
+            pre_node1 = mapping[node1].item()
+            pre_node2 = mapping[node2].item()
+            mapping[node1] = new_node_id  
+            mapping[node2] = new_node_id
                 
-                g.remove_nodes([pre_node1, pre_node2], ntype=src_type)
-     #   print("stop merging nodes", time.time()- start_time)       
+            if node1 > node2:
+                mapping = torch.where(mapping >pre_node1, mapping -1, mapping)
+                mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
+            else:
+                mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
+                mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
+            g.remove_nodes([pre_node1, pre_node2], ntype=node_type) 
+            
+                
+    #   print("stop merging nodes", time.time()- start_time)       
         return g, mapping     
    
     
@@ -371,17 +393,50 @@ class HeteroCoarsener(GraphSummarizer):
         pass
     
     
+
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
+
+
+# test = TestHeteroSmall().load_graph()
+
+# test = TestHeteroBig().load_graph()
+
+# coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+
+
+# H = coarsener._create_h_spatial_rgcn(original_graph)
+# candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
+# merged_graph, mapping_authors = coarsener._merge_nodes(original_graph, "author", candidates["author"])
+# #merged_graph, mapping_paper = coarsener._merge_nodes(merged_graph, "paper", candidates["paper"])
+# print(merged_graph)
+# print(original_graph)
+#coarsener._costs_of_merges(candidates)
+
+#coarsener._merge()
+# aifb = AIFB()
+# new_g = aifb.load_graph()   
+    
+# new_g.nodes("Forschungsgebiete")
+
+# coarsener = HeteroCoarsener(None, new_g, 0.5)
+# H = coarsener._create_h_spatial_rgcn(new_g)
+# candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
+# merged_graph, mapping_authors = coarsener._merge_nodes(new_g, "Forschungsgebiete", candidates["Forschungsgebiete"])
+
+#
+    
     
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+#dataset = DBLP() 
+#original_graph = dataset.load_graph()
 
 
 #test = TestHeteroSmall().load_graph()
 
 # test = TestHeteroBig().load_graph()
 
-coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
-
-coarsener._create_h_spectral_rgcn(original_graph)
+#coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+#
+#coarsener._create_h_spectral_rgcn(original_graph)
 # coarsener.summarize(original_graph)
