@@ -1,7 +1,8 @@
 import torch
+import torch.nn as nn
 from torch_geometric.nn import HeteroConv, SAGEConv
 import torch.nn.functional as F
-
+from dgl.nn import RelGraphConv
 # Define a heterogeneous GNN model
 class HeteroGNN(torch.nn.Module):
     def __init__(self, metadata, hidden_channels):
@@ -25,20 +26,15 @@ class HeteroGNN(torch.nn.Module):
     
     
 class ImprovedHeteroGNN(torch.nn.Module):
-    def __init__(self, metadata, hidden_channels, x_dict,num_classes, num_layers=2, dropout=0.3):
+    def __init__(self, metadata, hidden_channels, x_dict,num_classes, target_feat="author", num_layers=2, dropout=0.3):
         super().__init__()
-        
+        self.target_feat = target_feat
         # Extract node types and edge types from metadata
         node_types, edge_types = metadata[0], metadata[1]
         
         # Create embedding layers for each node type with proper dimensions
         self.embeddings = torch.nn.ModuleDict()
-        for node_type, feat_dim in {
-            'author': x_dict['author'].size(1),
-            'paper': x_dict['paper'].size(1),
-            'term': x_dict['term'].size(1),
-            'conference': x_dict['conference'].size(1)
-        }.items():
+        for node_type, feat_dim in { i: x_dict[i].size(1) for i in  x_dict.keys()}.items():
             self.embeddings[node_type] = torch.nn.Linear(feat_dim, hidden_channels)
         
         # Multiple heterogeneous conv layers for message passing
@@ -67,7 +63,7 @@ class ImprovedHeteroGNN(torch.nn.Module):
                 torch.nn.Linear(hidden_channels, hidden_channels),
                 torch.nn.ReLU(),
                 torch.nn.Dropout(dropout),
-                torch.nn.Linear(hidden_channels, num_classes if node_type == 'author' else hidden_channels)
+                torch.nn.Linear(hidden_channels, num_classes if node_type == target_feat else hidden_channels)
             )
             for node_type in node_types
         })
@@ -108,8 +104,34 @@ class ImprovedHeteroGNN(torch.nn.Module):
         }
         
         # Apply log softmax to author nodes (for classification)
-        if 'author' in output_dict:
-            output_dict['author'] = F.log_softmax(output_dict['author'], dim=1)
+        if self.target_feat in output_dict:
+            output_dict[self.target_feat] = F.log_softmax(output_dict[self.target_feat], dim=1)
             
         return output_dict
     
+from dgl.nn import HeteroGraphConv, GraphConv
+
+# Define one R-GCN layer using HeteroGraphConv
+class RGCNLayer(nn.Module):
+    def __init__(self, in_feats, out_feats, etypes):
+        super().__init__()
+        self.conv = HeteroGraphConv({
+            etype: GraphConv(in_feats, out_feats)
+            for etype in etypes
+        })
+
+    def forward(self, g, inputs):
+        return self.conv(g, inputs)
+
+# R-GCN model with two layers
+class RGCN(nn.Module):
+    def __init__(self, in_feats, hidden_feats, out_feats, etypes):
+        super().__init__()
+        self.layer1 = RGCNLayer(in_feats, hidden_feats, etypes)
+        self.layer2 = RGCNLayer(hidden_feats, out_feats, etypes)
+
+    def forward(self, g, inputs):
+        h = self.layer1(g, inputs)
+        h = {k: F.relu(v) for k, v in h.items()}
+        h = self.layer2(g, h)
+        return h

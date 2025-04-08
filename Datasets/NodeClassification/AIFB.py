@@ -54,4 +54,6 @@ class AIFB():
                 new_g.nodes[ntype].data[feat_name] = feat_data
 
         # Now, new_g has all edge types renamed with the pattern: srcType_oldRel_dstType.
+       # new_g.dataset = dataset
+        
         return new_g
