@@ -161,12 +161,12 @@ class HeteroCoarsener(GraphSummarizer):
         
         for src_type, etype, dst_type in g.canonical_etypes:
             is_features = "feat" in g.nodes[dst_type].data
-            degree = torch.tensor(self.node_degrees[etype]["out"]).to(device) + 1 
+            degree = self.node_degrees[etype]["out"] + 1 
             degree_inv_src = 1/torch.sqrt(degree) 
             degree_inv_src = degree_inv_src.to(device)
             degree_inv_src = torch.where(degree_inv_src == float("inf"),  torch.tensor(0.0),degree_inv_src) # why does this not work
            
-            degree = torch.tensor(self.node_degrees[etype]["in"]).to(device) + 1 
+            degree = self.node_degrees[etype]["in"] + 1 
             degree_inv_dest = 1/torch.sqrt(degree) 
             degree_inv_dest = torch.where(degree_inv_dest == float("inf"), torch.tensor(0.0), degree_inv_dest)
            
@@ -439,7 +439,7 @@ class HeteroCoarsener(GraphSummarizer):
             
             for node1, node2 in tqdm(merge_candidates, "calculate H_coarsen"):
                 
-                merged_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, node_type, [(node1, node2)])
+              #  merged_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, node_type, [(node1, node2)])
               #  P = self._get_partitioning(node2, node1, self.coarsened_graph.num_nodes(ntype=node_type))
                 #h_u = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node1], node_type)
                 #h_v = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node2], node_type)
@@ -449,7 +449,7 @@ class HeteroCoarsener(GraphSummarizer):
                 
                     if src_type != node_type:
                         continue
-                    h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
+                    h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, None, node1, (src_type, etype, dst_type), node2)
                     #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
                     #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
 
@@ -522,13 +522,13 @@ class HeteroCoarsener(GraphSummarizer):
     
     
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
-coarsener = HeteroCoarsener(None,original_graph, 0.5)
+# coarsener = HeteroCoarsener(None,original_graph, 0.5)
 
 
-coarsener.summarize2()
+# coarsener.summarize2()
 
 #H = coarsener._create_h_spatial_rgcn(original_graph)
 #candidates = coarsener._find_lowest_lowest_k_cost_edges(coarsener._sum_edge_costs(coarsener._get_rgcn_edges(H)))
