@@ -53,7 +53,6 @@ class HeteroCoarsener(GraphSummarizer):
         self.init_node_info()
         
     
-    
     def init_node_info(self):
         
         self.node_degrees = {}
@@ -69,6 +68,32 @@ class HeteroCoarsener(GraphSummarizer):
                 'out': out_deg,
                 'in': in_deg
             }
+            
+    def _create_h_spectral_rgcn_2(self, g):
+        H = dict()
+        eps = 1e-12  # small constant to prevent division by zero
+        start_time = time.time()
+
+        # Loop over edge types
+        for src_type, etype, dst_type in g.canonical_etypes:
+            # Use the library's native function if available; here we assume adj_external returns a sparse matrix.
+            adj = g.adj_external(etype=etype)  
+            
+            # Calculate degree sums without converting to dense if possible; if not, convert once.
+            d_src_sum = adj.sum(axis=0).to_dense()  # shape: (num_src_nodes,)
+            d_dst_sum = adj.sum(axis=1).to_dense()  # shape: (num_dst_nodes,)
+
+            # Compute normalized degrees using clamping instead of explicit torch.where
+            d_src = torch.pow(torch.diag(d_src_sum.clamp(min=eps)), -0.5)
+            d_dst = torch.pow(torch.diag(d_dst_sum.clamp(min=eps)), -0.5)
+
+            # Perform the normalization: note that using matmul (@) with sparse matrices may be replaced with
+            # an equivalent sparse operation if supported.
+            H[etype] = (d_dst @ adj @ d_src).to_dense()
+            
+        print("created H", time.time() - start_time)
+        return H
+
         
     def _create_h_spectral_rgcn(self, g):
         # TODO: no normalization :// 
@@ -88,6 +113,19 @@ class HeteroCoarsener(GraphSummarizer):
         print("created H", time.time() - start_time)
         return H
             
+    def _create_h_spatial_via_cache_for_node(self, H, g_orig, g_merged, node, conical_type, node2):
+        cache = H
+        s_u = cache[conical_type[1]][node]  
+        s_v = cache[conical_type[1]][node2]
+        d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
+        d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
+        d_u_v = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type))) + 1
+        
+        h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
+        #h = s_u - (1/(torch.sqrt(d_u + 1))) * g_orig.nodes[conical_type[2]].data["feat"][node] + (1/(torch.sqrt(d_v + 1))) * g_orig.nodes[conical_type[2]].data["feat"][node2]
+        #h = h / (torch.sqrt(torch.tensor(d_u_v + 1))) 
+        return h
+    
     def _create_h_spatial_rgcn_for_node(self, g, node, node_type):
         h = dict()
         
@@ -111,13 +149,14 @@ class HeteroCoarsener(GraphSummarizer):
                 else:
                     h[etype] += degree_inv_src[node] * degree_inv_dest[neigh] 
         return h
-
-
-
+    
+        
     def _create_h_spatial_rgcn(self, g):
         start_time = time.time()
         print("start create H")
         H = dict()
+        self.cache = dict()
+
         device = "cpu"
         
         for src_type, etype, dst_type in g.canonical_etypes:
@@ -246,6 +285,7 @@ class HeteroCoarsener(GraphSummarizer):
         return total_costs
     
     def _find_lowest_lowest_k_cost_edges(self, total_costs, k =200):
+        start_time = time.time()    
         lowest_nodes_per_type = dict()
         for ntype in self.coarsened_graph.ntypes:
             if ntype not in total_costs:
@@ -285,6 +325,8 @@ class HeteroCoarsener(GraphSummarizer):
                     all_merged.remove(node1)
                     all_merged.remove(node2)
             lowest_nodes_per_type[ntype] = lowest_without_dups
+            
+        print("stop lowest cost edges", time.time() - start_time)
         return lowest_nodes_per_type                        
                 
               
@@ -329,7 +371,7 @@ class HeteroCoarsener(GraphSummarizer):
         return merge_list
 
     
-    def _merge_nodes(self, g, node_type, node_pairs, mappings):
+    def _merge_nodes(self, g, node_type, node_pairs):
         """
         Merge multiple node pairs in a heterogeneous DGL graph.
 
@@ -389,27 +431,31 @@ class HeteroCoarsener(GraphSummarizer):
     
             
     def _costs_of_merges(self, merge_list, H):
+        start_time = time.time()
         H_original = H#self._create_h_spatial_rgcn(self.coarsened_graph)
         costs_dict = dict()
         for node_type, merge_candidates in merge_list.items():
             costs_dict[node_type] = dict()
-            if node_type != "author":
-                continue
+            
             for node1, node2 in tqdm(merge_candidates, "calculate H_coarsen"):
                 
                 merged_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, node_type, [(node1, node2)])
               #  P = self._get_partitioning(node2, node1, self.coarsened_graph.num_nodes(ntype=node_type))
-                h_u = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node1], node_type)
-                h_v = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node2], node_type)
+                #h_u = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node1], node_type)
+                #h_v = self._create_h_spatial_rgcn_for_node(merged_graph, mapping_authors[node2], node_type)
                 
                 costs = 0
                 for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                    
+                
                     if src_type != node_type:
                         continue
+                    h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
+                    #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
+                    #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
+
                     H_type_orig = torch.stack(list(H_original[etype].values()))
                     
-                    costs = torch.norm(h_u[etype] - H_type_orig[node1], 2) + torch.norm(h_v[etype] - H_type_orig[node2], 2)
+                    costs = torch.norm(h_uv - H_type_orig[node1], 2) + torch.norm(h_uv - H_type_orig[node2], 2)
                     
                   #  neighbors1 = self.coarsened_graph.successors(node1, etype=etype)
                  #   neighbors2 = self.coarsened_graph.successors(node2, etype=etype)
@@ -420,6 +466,7 @@ class HeteroCoarsener(GraphSummarizer):
                         
                        # costs += torch.norm(h_i[etype] - H_something[neighbor], 2)
                 costs_dict[node_type][(node1, node2)] = costs
+        print("costs of merges", time.time() - start_time)
         return costs_dict
        
     def _get_partitioning(self, u,v , number_of_nodes):
@@ -457,24 +504,31 @@ class HeteroCoarsener(GraphSummarizer):
     def summarize2(self, k=5):
         
         for i in range(k):
+            self.init_node_info()
             H = self._create_h_spatial_rgcn(self.coarsened_graph)
             candidates = self._find_lowest_lowest_k_cost_edges(self._sum_edge_costs(self._get_rgcn_edges(H)))
+            cost_dict = self._costs_of_merges(candidates, H)
+            sorted_costs = dict()
+            for node_type, pairs in cost_dict.items():
+                sorted_costs[node_type] = dict(sorted(pairs.items(), key=lambda item: item[1]))
             for ntype in self.coarsened_graph.ntypes:
                 if self.coarsened_graph.num_nodes(ntype) * 2 < self.original_graph.num_nodes(ntype):
                     continue
-                self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, candidates[ntype], None)
-
+                if self.pairs_per_level > len(sorted_costs[ntype].keys()):
+                    self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, list(sorted_costs[ntype].keys())[:self.pairs_per_level])
+                else:
+                    self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, sorted_costs[ntype].keys())
         return self.coarsened_graph, mapping_authors
     
     
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
 
-# coarsener = HeteroCoarsener(None,g, 0.5)
+coarsener = HeteroCoarsener(None,original_graph, 0.5)
 
 
-# coarsener.summarize2()
+coarsener.summarize2()
 
 #H = coarsener._create_h_spatial_rgcn(original_graph)
 #candidates = coarsener._find_lowest_lowest_k_cost_edges(coarsener._sum_edge_costs(coarsener._get_rgcn_edges(H)))
