@@ -122,14 +122,18 @@ class HeteroCoarsener(GraphSummarizer):
         
         for src_type, etype, dst_type in g.canonical_etypes:
             is_features = "feat" in g.nodes[dst_type].data
-            degree = torch.tensor(self.node_degrees[etype]["out"]).to(device)
-            degree_inv_src = 1/torch.sqrt(degree)
+            degree = torch.tensor(self.node_degrees[etype]["out"]).to(device) + 1 
+            degree_inv_src = 1/torch.sqrt(degree) 
             degree_inv_src = degree_inv_src.to(device)
-            degree = torch.tensor(self.node_degrees[etype]["in"]).to(device)
-            degree_inv_dest = 1/torch.sqrt(degree)
+            degree_inv_src = torch.where(degree_inv_src == float("inf"),  torch.tensor(0.0),degree_inv_src) # why does this not work
+           
+            degree = torch.tensor(self.node_degrees[etype]["in"]).to(device) + 1 
+            degree_inv_dest = 1/torch.sqrt(degree) 
+            degree_inv_dest = torch.where(degree_inv_dest == float("inf"), torch.tensor(0.0), degree_inv_dest)
+           
             if is_features:
                 features = g.nodes[dst_type].data["feat"].to(device)
-            degree_inv_dest = degree_inv_dest.to(device)
+            #degree_inv_dest = degree_inv_dest.to(device)
             H[etype] = dict()
             all_nodes = g.nodes(src_type)
             #H[etype] = 
@@ -159,7 +163,7 @@ class HeteroCoarsener(GraphSummarizer):
         
         self.nearest_neighbors_keep_rate = 0.1
         self.top_k_nn = 3
-        self.num_nearest_neighbors = 50
+        self.num_nearest_neighbors = 30
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if not src_type in init_costs:
@@ -221,9 +225,70 @@ class HeteroCoarsener(GraphSummarizer):
         print("stop init costs", time.time() - start_time)
         return init_costs
     
+    def _sum_edge_costs(self, init_costs):
+        total_costs = dict()
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            if not src_type in total_costs:
+                total_costs[src_type] = dict()
+                for node in self.coarsened_graph.nodes(src_type):
+                    if not node.item() in total_costs[src_type]:
+                        total_costs[src_type][node.item()] = dict()
+                    
+                    costs = list(init_costs[etype][0][node.item()])
+                    nodes = list(init_costs[etype][1][node.item()])
+                    for cost, merge_node in zip(costs, nodes):
+                        if merge_node == node:
+                            continue
+                        if not merge_node in total_costs[src_type][node.item()]:
+                            total_costs[src_type][node.item()][merge_node] = cost
+                        else:
+                            total_costs[src_type][node.item()][merge_node] += cost
+        return total_costs
+    
+    def _find_lowest_lowest_k_cost_edges(self, total_costs, k =200):
+        lowest_nodes_per_type = dict()
+        for ntype in self.coarsened_graph.ntypes:
+            if ntype not in total_costs:
+                continue
+            lowest_costs = [float("inf")]*k
+            lowest_nodes = [None]*k
+                
+            for node, candidates in total_costs[ntype].items():
+                
+                for merge_node, cost in candidates.items():
+                    if (node, merge_node) in lowest_nodes:
+                       continue
+             
+                    if cost < lowest_costs[-1]:
+                        lowest_costs[-1] = cost
+                        lowest_nodes[-1] = (merge_node, node)
+                        lowest_costs, lowest_nodes = zip(*sorted(zip(lowest_costs, lowest_nodes)))
+                        lowest_costs, lowest_nodes = list(lowest_costs), list(lowest_nodes)
             
+            # only allow merging of nodes that are not already merged
+            all_merged = set()
+            for node_pair in lowest_nodes:
+                if node_pair == None:
+                    continue
+                node1, node2 = node_pair
+                if node1 in all_merged or node2 in all_merged:
+                    continue
+                all_merged.add(node1)
+                all_merged.add(node2)
+            lowest_without_dups = list()
+            for node_pair in lowest_nodes:
+                if node_pair == None:
+                    continue
+                node1, node2 = node_pair
+                if node1 in all_merged and node2 in all_merged:
+                    lowest_without_dups.append((node1, node2))
+                    all_merged.remove(node1)
+                    all_merged.remove(node2)
+            lowest_nodes_per_type[ntype] = lowest_without_dups
+        return lowest_nodes_per_type                        
+                
               
-    def _find_lowest_cost_edges(self, init_costs):
+    def _get_intersection(self, init_costs):
         print("start lowest cost edges")
         start_time = time.time()
         closest_over_all_etypes = dict()
@@ -264,7 +329,7 @@ class HeteroCoarsener(GraphSummarizer):
         return merge_list
 
     
-    def _merge_nodes(self, g, node_type, node_pairs):
+    def _merge_nodes(self, g, node_type, node_pairs, mappings):
         """
         Merge multiple node pairs in a heterogeneous DGL graph.
 
@@ -283,8 +348,9 @@ class HeteroCoarsener(GraphSummarizer):
         mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
         
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
-            new_node_id =  g.num_nodes(ntype=node_type)
-            dgl.add_nodes(g, new_node_id, ntype=node_type)
+            g.add_nodes(1, ntype=node_type)
+            new_node_id =  g.num_nodes(ntype=node_type) -1
+            
             for src_type, etype,dst_type in g.canonical_etypes:
                 if src_type != node_type:
                     continue
@@ -371,7 +437,7 @@ class HeteroCoarsener(GraphSummarizer):
     
     def summarize(self, original_graph):
         H = self._create_h_spatial_rgcn(original_graph)
-        candidates = self._select_candidates(self._find_lowest_cost_edges(self._get_rgcn_edges(H)))
+        candidates = self._select_candidates(self._get_intersection(self._get_rgcn_edges(H)))
         #return candidates
         costs = self._costs_of_merges(candidates, H)["author"]
         sort_by_value = dict(sorted(costs.items(), key=lambda item: item[1]))
@@ -388,26 +454,32 @@ class HeteroCoarsener(GraphSummarizer):
         return merged_graph, mapping_authors
     
         
-    def _merge_new():
+    def summarize2(self, k=5):
         
-        pass
+        for i in range(k):
+            H = self._create_h_spatial_rgcn(self.coarsened_graph)
+            candidates = self._find_lowest_lowest_k_cost_edges(self._sum_edge_costs(self._get_rgcn_edges(H)))
+            for ntype in self.coarsened_graph.ntypes:
+                if self.coarsened_graph.num_nodes(ntype) * 2 < self.original_graph.num_nodes(ntype):
+                    continue
+                self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, candidates[ntype], None)
+
+        return self.coarsened_graph, mapping_authors
     
     
 
 # dataset = DBLP() 
 # original_graph = dataset.load_graph()
 
-
-# test = TestHeteroSmall().load_graph()
-
-# test = TestHeteroBig().load_graph()
-
-# coarsener = HeteroCoarsener(dataset, original_graph, 0.5)
+# coarsener = HeteroCoarsener(None,g, 0.5)
 
 
-# H = coarsener._create_h_spatial_rgcn(original_graph)
-# candidates = coarsener._select_candidates(coarsener._find_lowest_cost_edges(coarsener._get_rgcn_edges(H)))
-# merged_graph, mapping_authors = coarsener._merge_nodes(original_graph, "author", candidates["author"])
+# coarsener.summarize2()
+
+#H = coarsener._create_h_spatial_rgcn(original_graph)
+#candidates = coarsener._find_lowest_lowest_k_cost_edges(coarsener._sum_edge_costs(coarsener._get_rgcn_edges(H)))
+#candidates = coarsener._select_candidates(coarsener._get_intersection(coarsener._get_rgcn_edges(H)))
+#merged_graph, mapping_authors = coarsener._merge_nodes(original_graph, "author", candidates["author"])
 # #merged_graph, mapping_paper = coarsener._merge_nodes(merged_graph, "paper", candidates["paper"])
 # print(merged_graph)
 # print(original_graph)
