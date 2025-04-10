@@ -26,7 +26,8 @@ class HeteroGNN(torch.nn.Module):
     
     
 class ImprovedHeteroGNN(torch.nn.Module):
-    def __init__(self, metadata, hidden_channels, x_dict,num_classes, target_feat="author", num_layers=2, dropout=0.3):
+    def __init__(self, metadata, hidden_channels, x_dict,num_classes, target_feat="author", num_layers=2, dropout=0.3, with_non_linear = True):
+        
         super().__init__()
         self.target_feat = target_feat
         # Extract node types and edge types from metadata
@@ -56,18 +57,28 @@ class ImprovedHeteroGNN(torch.nn.Module):
             node_type: torch.nn.LayerNorm(hidden_channels)
             for node_type in node_types
         })
-        
-        # Output projection layers
-        self.output_projs = torch.nn.ModuleDict({
-            node_type: torch.nn.Sequential(
-                torch.nn.Linear(hidden_channels, hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(dropout),
-                torch.nn.Linear(hidden_channels, num_classes if node_type == target_feat else hidden_channels)
-            )
-            for node_type in node_types
-        })
-        
+        if with_non_linear:
+            # Output projection layers
+            self.output_projs = torch.nn.ModuleDict({
+                node_type: torch.nn.Sequential(
+                    torch.nn.Linear(hidden_channels, hidden_channels),
+                    torch.nn.ReLU(),
+                    torch.nn.Dropout(dropout),
+                    torch.nn.Linear(hidden_channels, num_classes if node_type == target_feat else hidden_channels)
+                )
+                for node_type in node_types
+            })
+        else:
+            # Output projection layers
+            self.output_projs = torch.nn.ModuleDict({
+                node_type: torch.nn.Sequential(
+                    torch.nn.Linear(hidden_channels, hidden_channels),
+                    torch.nn.Dropout(dropout),
+                    torch.nn.Linear(hidden_channels, num_classes if node_type == target_feat else hidden_channels)
+                )
+                for node_type in node_types
+            })
+                
         self.dropout = dropout
         
     def forward(self, x_dict, edge_index_dict):
