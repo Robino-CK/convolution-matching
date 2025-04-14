@@ -385,6 +385,7 @@ class HeteroCoarsener(GraphSummarizer):
             new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
             mapping (dict): Mapping from original node IDs to supernode ID.
         """
+        start_time = time.time()
         g = deepcopy(g)
         
         mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
@@ -425,7 +426,7 @@ class HeteroCoarsener(GraphSummarizer):
             g.remove_nodes([pre_node1, pre_node2], ntype=node_type) 
             
                 
-    #   print("stop merging nodes", time.time()- start_time)       
+        print("stop merging nodes", time.time()- start_time)       
         return g, mapping     
    
     
@@ -450,21 +451,11 @@ class HeteroCoarsener(GraphSummarizer):
                     if src_type != node_type:
                         continue
                     h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, None, node1, (src_type, etype, dst_type), node2)
-                    #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
-                    #h_uv = self._create_h_spatial_via_cache_for_node(H_original, self.coarsened_graph, merged_graph, node1, (src_type, etype, dst_type), node2)
-
+        
                     H_type_orig = torch.stack(list(H_original[etype].values()))
                     
-                    costs = torch.norm(h_uv - H_type_orig[node1], 2) + torch.norm(h_uv - H_type_orig[node2], 2)
-                    
-                  #  neighbors1 = self.coarsened_graph.successors(node1, etype=etype)
-                 #   neighbors2 = self.coarsened_graph.successors(node2, etype=etype)
-                 #   neighbors = set(torch.cat((neighbors1, neighbors2)).tolist())
-                    
-        #            for neighbor in neighbors:
-       #                 h_i = self._create_h_spatial_rgcn_for_node(self.coarsened_graph, neighbor, dst_type)
-                        
-                       # costs += torch.norm(h_i[etype] - H_something[neighbor], 2)
+                    costs += torch.norm(h_uv - H_type_orig[node1], 2) + torch.norm(h_uv - H_type_orig[node2], 2)
+                 
                 costs_dict[node_type][(node1, node2)] = costs
         print("costs of merges", time.time() - start_time)
         return costs_dict
@@ -500,9 +491,21 @@ class HeteroCoarsener(GraphSummarizer):
 
         return merged_graph, mapping_authors
     
+    def _get_master_mapping(self, mappings, ntype):
+        master_mapping = dict()
         
+        for node in self.coarsened_graph.nodes(ntype):
+            node_id = node.item()
+            for mapping in mappings:
+                node_id = mapping[node_id]
+            master_mapping[node.item()] = node_id.item()
+        return master_mapping
+    
+    
     def summarize2(self, k=5):
-        
+        mappings = dict()
+        for ntype in self.coarsened_graph.ntypes:
+            mappings[ntype] = list()
         for i in range(k):
             self.init_node_info()
             H = self._create_h_spatial_rgcn(self.coarsened_graph)
@@ -515,10 +518,13 @@ class HeteroCoarsener(GraphSummarizer):
                 if self.coarsened_graph.num_nodes(ntype) * 2 < self.original_graph.num_nodes(ntype):
                     continue
                 if self.pairs_per_level > len(sorted_costs[ntype].keys()):
-                    self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, list(sorted_costs[ntype].keys())[:self.pairs_per_level])
+                    
+                    self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, list(sorted_costs[ntype].keys())[:self.pairs_per_level])
                 else:
-                    self.coarsened_graph, mapping_authors = self._merge_nodes(self.coarsened_graph, ntype, sorted_costs[ntype].keys())
-        return self.coarsened_graph, mapping_authors
+                    self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, sorted_costs[ntype].keys())
+                mappings[ntype].append(mapping)
+        mapping = self._get_master_mapping(mappings["author"], "author" )
+        return self.coarsened_graph, mapping
     
     
 
