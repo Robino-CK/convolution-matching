@@ -194,7 +194,36 @@ class HeteroCoarsener(GraphSummarizer):
         return H
     
     
-    
+    def _init_merge_graph(self, costs):
+        print("start init merge graph")
+        start_time = time.time()
+        self.merge_graphs =dict()
+        for ntype in self.coarsened_graph.ntypes:
+            num_nodes = self.coarsened_graph.number_of_nodes(ntype=ntype) 
+            num_edges = num_nodes * self.num_nearest_neighbors 
+            self.merge_graphs [ntype] = dgl.graph(([], []), num_nodes=self.coarsened_graph.number_of_nodes(ntype=ntype))
+            edge_weight_tensor = torch.empty(num_edges) #torch.empty((1,0)).squeeze()
+            edge_tensor = torch.empty((2, num_edges), dtype=torch.int64)
+            edge_cnt = 0
+            for node, neighbros_costs in costs[ntype].items():
+                for neighbor,n_costs  in neighbros_costs.items():
+                    
+                    if node == neighbor:
+                        continue
+                    #edge = torch.tensor([[node],[neighbor]])
+                    edge_tensor[0][edge_cnt] = node# torch.cat((edge_tensor, edge), dim=1)
+                    edge_tensor[1][edge_cnt] = neighbor
+                    edge_weight_tensor[edge_cnt] = n_costs ##torch.cat((edge_weight_tensor, torch.tensor([n_costs])))
+            
+                    edge_cnt += 1
+            if not edge_cnt == num_edges:
+                print("WARNING", ntype, "edge count", edge_cnt, "num edges", num_edges)
+                
+            self.merge_graphs[ntype].add_edges(edge_tensor[0], edge_tensor[1])
+            self.merge_graphs[ntype].edata["edge_weight"] = torch.tensor(edge_weight_tensor)
+            print("created merge graph for type", ntype)
+        print("stop init merge graph", time.time() - start_time)
+
     def _get_rgcn_edges(self, H_normal):
         print("start init costs")
         start_time = time.time()
@@ -284,7 +313,7 @@ class HeteroCoarsener(GraphSummarizer):
                             total_costs[src_type][node.item()][merge_node] += cost
         return total_costs
     
-    def _find_lowest_lowest_k_cost_edges(self, total_costs, k =200):
+    def _find_lowest_k_cost_edges(self, total_costs, k =200):
         start_time = time.time()    
         lowest_nodes_per_type = dict()
         for ntype in self.coarsened_graph.ntypes:
@@ -509,7 +538,7 @@ class HeteroCoarsener(GraphSummarizer):
         for i in range(k):
             self.init_node_info()
             H = self._create_h_spatial_rgcn(self.coarsened_graph)
-            candidates = self._find_lowest_lowest_k_cost_edges(self._sum_edge_costs(self._get_rgcn_edges(H)))
+            candidates = self._find_lowest_k_cost_edges(self._sum_edge_costs(self._get_rgcn_edges(H)))
             cost_dict = self._costs_of_merges(candidates, H)
             sorted_costs = dict()
             for node_type, pairs in cost_dict.items():
@@ -528,16 +557,16 @@ class HeteroCoarsener(GraphSummarizer):
     
     
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
 
-# coarsener = HeteroCoarsener(None,original_graph, 0.5)
+coarsener = HeteroCoarsener(None,original_graph, 0.5)
 
 
 # coarsener.summarize2()
 
-#H = coarsener._create_h_spatial_rgcn(original_graph)
-#candidates = coarsener._find_lowest_lowest_k_cost_edges(coarsener._sum_edge_costs(coarsener._get_rgcn_edges(H)))
+H = coarsener._create_h_spatial_rgcn(original_graph)
+candidates = coarsener._init_merge_graph(coarsener._sum_edge_costs(coarsener._get_rgcn_edges(H)))
 #candidates = coarsener._select_candidates(coarsener._get_intersection(coarsener._get_rgcn_edges(H)))
 #merged_graph, mapping_authors = coarsener._merge_nodes(original_graph, "author", candidates["author"])
 # #merged_graph, mapping_paper = coarsener._merge_nodes(merged_graph, "paper", candidates["paper"])
