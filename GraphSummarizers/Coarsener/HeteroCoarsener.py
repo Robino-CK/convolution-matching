@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, max_merges_per_level = 100
+                 num_nearest_neighbors: int = 10
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -45,7 +45,6 @@ class HeteroCoarsener(GraphSummarizer):
         self.original_graph = original_graph
         self.dataset = dataset
         self.num_nearest_neighbors = num_nearest_neighbors
-        self.max_merges_per_level = max_merges_per_level
         self.pairs_per_level = pairs_per_level
         self.coarsened_graph = original_graph.clone()
         self.merge_graph = None
@@ -82,8 +81,10 @@ class HeteroCoarsener(GraphSummarizer):
         s_v = cache[conical_type[1]][node2]
         d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
         d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
-        d_u_v = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type))) + 1
-        
+        d_u_v = d_u + d_v 
+        # TODO
+        #k = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type)))  + 1 
+     
         h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
         return h
     
@@ -197,12 +198,12 @@ class HeteroCoarsener(GraphSummarizer):
                 continue
             costs = self.merge_graphs[ntype].edata["edge_weight"]
             edges = self.merge_graphs[ntype].edges()
-            k = min(self.num_nearest_neighbors * self.max_merges_per_level, costs.shape[0]) # TODO
+            k = min(self.num_nearest_neighbors * self.pairs_per_level, costs.shape[0]) # TODO
             lowest_costs = torch.topk(costs, k,largest=False, sorted=True)    
             topk_non_overlapping = list()
             nodes = set()
             for edge_index in lowest_costs.indices:
-                if len(nodes) > self.max_merges_per_level: # TODO
+                if len(nodes) > self.pairs_per_level: 
                     break
                 src_node = edges[0][edge_index].item()
                 dst_node = edges[1][edge_index].item()
@@ -401,35 +402,40 @@ class HeteroCoarsener(GraphSummarizer):
             master_mapping[node.item()] = node_id
         return master_mapping
     
-
-
-    def summarize(self):
-        mappings = dict()
+    
+    def init_step(self):
+        self.mappings = dict()
         for ntype in self.coarsened_graph.ntypes:
-            mappings[ntype] = list()
+            self.mappings[ntype] = list()
         
         self._create_h_spatial_rgcn(self.original_graph)
         self.merge_edges = self._costs_of_merges(self._candidaes_over_all(self._init_costs_rgcn()))
         self._init_merge_graph(self.merge_edges)
-        candidates = self._find_lowest_cost_edges()
+        self.candidates = self._find_lowest_cost_edges()
     
-
-        for i in range(20):
-            for ntype, merge_list in candidates.items():
-                self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
-                mappings[ntype].append(mapping)
+    
+    def iteration_step(self):
+        for ntype, merge_list in self.candidates.items():
+            self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
+            self.mappings[ntype].append(mapping)
                 
-                self.merge_graphs[ntype],_ = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
+            self.merge_graphs[ntype],_ = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
                 
-            candidates = self._find_lowest_cost_edges()
+        self.candidates = self._find_lowest_cost_edges()
 
-        mapping = self._get_master_mapping(mappings["author"], "author" )
+    def summarize(self, num_steps=20):
+        
+        self.init_step()
+        for i in range(num_steps):
+            self.iteration_step()
+
+        mapping = self._get_master_mapping(self.mappings["author"], "author" )
         
         return self.coarsened_graph, mapping
 
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
 
-# coarsener = HeteroCoarsener(None,original_graph, 0.5)
-# merge_graph, mapping = coarsener.summarize()
+coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
+merge_graph, mapping = coarsener.summarize()
