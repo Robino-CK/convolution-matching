@@ -423,19 +423,24 @@ class HeteroCoarsener(GraphSummarizer):
                 
         self.candidates = self._find_lowest_cost_edges()
 
+
     def summarize(self, num_steps=20):
         
         self.init_step()
         for i in range(num_steps):
             self.iteration_step()
 
-        mapping = self._get_master_mapping(self.mappings["author"], "author" )
         
-        return self.coarsened_graph, mapping
 
+    def get_coarsend_graph(self):
+        return self.coarsened_graph
+    
+    def get_mapping(self, ntype):
+        return self._get_master_mapping(self.mappings[ntype], ntype )
+        
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
-merge_graph, mapping = coarsener.summarize()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
+# merge_graph, mapping = coarsener.summarize()
