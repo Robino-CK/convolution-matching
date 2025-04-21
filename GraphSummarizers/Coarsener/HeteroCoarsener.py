@@ -20,7 +20,7 @@ from Datasets.NodeClassification.DBLP import DBLP
 from tqdm import tqdm
 from dgl.dataloading import MultiLayerFullNeighborSampler, DataLoader
 from Datasets.NodeClassification.AIFB import AIFB
-
+import pickle
 from Datasets.NodeClassification.TestHetero import TestHeteroSmall, TestHeteroBig
 import dgl
 import torch
@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -46,7 +46,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.original_graph = original_graph
         self.dataset = dataset
         self.num_nearest_neighbors = num_nearest_neighbors
-        self.num_nearest_per_etype = 2
+        self.num_nearest_per_etype = num_nearest_per_etype
         self.pairs_per_level = pairs_per_level
         self.coarsened_graph = original_graph.clone()
         self.merge_graph = None
@@ -140,7 +140,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.merge_graphs =dict()
         for ntype in self.coarsened_graph.ntypes:
             num_nodes = self.coarsened_graph.number_of_nodes(ntype=ntype) 
-            num_edges = num_nodes * self.num_nearest_neighbors * len(self.coarsened_graph.canonical_etypes)
+            num_edges = num_nodes * self.num_nearest_per_etype * len(self.coarsened_graph.canonical_etypes)
             self.merge_graphs [ntype] = dgl.graph(([], []), num_nodes=self.coarsened_graph.number_of_nodes(ntype=ntype))
             edge_weight_tensor = torch.empty(num_edges) #torch.empty((1,0)).squeeze()
             edge_tensor = torch.empty((2, num_edges), dtype=torch.int64)
@@ -159,6 +159,7 @@ class HeteroCoarsener(GraphSummarizer):
             edge_weight_tensor = edge_weight_tensor[:edge_cnt]
             self.merge_graphs[ntype].add_edges(edge_tensor[0], edge_tensor[1])
             self.merge_graphs[ntype].edata["edge_weight"] = torch.tensor(edge_weight_tensor)
+            self.merge_graphs[ntype].edata["node_size"] = torch.ones(edge_weight_tensor.shape[0])
             print("created merge graph for type", ntype)
         print("stop init merge graph", time.time() - start_time)
 
@@ -189,12 +190,14 @@ class HeteroCoarsener(GraphSummarizer):
             if not src_type in closest_over_all_etypes:
                 closest_over_all_etypes[src_type] = dict()
             for node in self.coarsened_graph.nodes(src_type):
-                nearest_neighbor = init_costs[etype][1][node.item()]
+                nearest_neighbor = list(init_costs[etype][1][node.item()])
+                if node.item() in nearest_neighbor:
+                    nearest_neighbor.remove(node.item())
                 if not node.item() in closest_over_all_etypes[src_type]:
-                    closest_over_all_etypes[src_type][node.item()] = list(nearest_neighbor)
+                    closest_over_all_etypes[src_type][node.item()] = nearest_neighbor
                 else:
                     
-                    closest_over_all_etypes[src_type][node.item()] = set(closest_over_all_etypes[src_type][node.item()]).union(list(nearest_neighbor))
+                    closest_over_all_etypes[src_type][node.item()] = set(closest_over_all_etypes[src_type][node.item()]).union(nearest_neighbor)
         print("stop intersection", time.time() - start_time)
         return closest_over_all_etypes
 
@@ -208,10 +211,10 @@ class HeteroCoarsener(GraphSummarizer):
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
            init_costs[etype] = self._init_calculate_clostest_edges(src_type, etype, dst_type)
         
-        for ntype in self.coarsened_graph.ntypes:
-            if "feat" in self.coarsened_graph.nodes[dst_type].data:
-                if not src_type in init_costs:
-                    init_costs[src_type] = dict()    
+        # for ntype in self.coarsened_graph.ntypes:
+        #     if "feat" in self.coarsened_graph.nodes[dst_type].data:
+        #         if not src_type in init_costs:
+        #             init_costs[src_type] = dict()    
               
         
         print("stop init costs", time.time() - start_time)
@@ -229,6 +232,7 @@ class HeteroCoarsener(GraphSummarizer):
             lowest_costs = torch.topk(costs, k,largest=False, sorted=True)    
             topk_non_overlapping = list()
             nodes = set()
+            # todo
             for edge_index in lowest_costs.indices:
                 if len(nodes) > self.pairs_per_level: 
                     break
@@ -443,6 +447,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.merge_edges = self._costs_of_merges(union)
         self._init_merge_graph(self.merge_edges)
         self.candidates = self._find_lowest_cost_edges()
+        #pickle.dump(self, open("coarsener.pkl", "wb"))
     
     
     def iteration_step(self):
@@ -470,8 +475,8 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
-coarsener.summarize()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
+# coarsener.summarize()
