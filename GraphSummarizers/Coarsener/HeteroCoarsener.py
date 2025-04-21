@@ -30,7 +30,9 @@ from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
-    def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10):
+    def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
+                 num_nearest_neighbors: int = 10, max_merges_per_level = 100
+                 ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
         approximately the same graph convolution.
@@ -42,7 +44,8 @@ class HeteroCoarsener(GraphSummarizer):
         self.r = r
         self.original_graph = original_graph
         self.dataset = dataset
-        
+        self.num_nearest_neighbors = num_nearest_neighbors
+        self.max_merges_per_level = max_merges_per_level
         self.pairs_per_level = pairs_per_level
         self.coarsened_graph = original_graph.clone()
         self.merge_graph = None
@@ -125,7 +128,7 @@ class HeteroCoarsener(GraphSummarizer):
             self.H_originals_stacked[etype] = torch.stack(list(H[etype].values()))
         self.H_originals = H
         print("created H", time.time() - start_time )  
-        return H
+    
     
     
     def _init_merge_graph(self, costs):
@@ -164,8 +167,6 @@ class HeteroCoarsener(GraphSummarizer):
         init_costs = dict()
         
         self.nearest_neighbors_keep_rate = 0.1
-        self.top_k_nn = 3
-        self.num_nearest_neighbors = 2
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if not src_type in init_costs:
@@ -196,12 +197,12 @@ class HeteroCoarsener(GraphSummarizer):
                 continue
             costs = self.merge_graphs[ntype].edata["edge_weight"]
             edges = self.merge_graphs[ntype].edges()
-            k = min(1000, costs.shape[0]) # TODO
-            lowest_costs = torch.topk(costs, k,largest=False, sorted=True) # TODO   
+            k = min(self.num_nearest_neighbors * self.max_merges_per_level, costs.shape[0]) # TODO
+            lowest_costs = torch.topk(costs, k,largest=False, sorted=True)    
             topk_non_overlapping = list()
             nodes = set()
             for edge_index in lowest_costs.indices:
-                if len(nodes) > 100: # TODO
+                if len(nodes) > self.max_merges_per_level: # TODO
                     break
                 src_node = edges[0][edge_index].item()
                 dst_node = edges[1][edge_index].item()
@@ -407,11 +408,11 @@ class HeteroCoarsener(GraphSummarizer):
         for ntype in self.coarsened_graph.ntypes:
             mappings[ntype] = list()
         
-        H = self._create_h_spatial_rgcn(self.original_graph)
+        self._create_h_spatial_rgcn(self.original_graph)
         self.merge_edges = self._costs_of_merges(self._candidaes_over_all(self._init_costs_rgcn()))
         self._init_merge_graph(self.merge_edges)
         candidates = self._find_lowest_cost_edges()
-
+    
 
         for i in range(20):
             for ntype, merge_list in candidates.items():
@@ -427,8 +428,8 @@ class HeteroCoarsener(GraphSummarizer):
         return self.coarsened_graph, mapping
 
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
-coarsener = HeteroCoarsener(None,original_graph, 0.5)
-merge_graph, mapping = coarsener.summarize()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5)
+# merge_graph, mapping = coarsener.summarize()
