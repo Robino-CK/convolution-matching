@@ -39,6 +39,9 @@ class HeteroCoarsener(GraphSummarizer):
         :param original_graph: The original DGLGraph instance.
         :param r: The ratio of nodes in the summarized and original graph. Must be in (0, 1].
         :param pairs_per_level: The number of node pairs to merge at each level of coarsening.
+        :param  num_nearest_neighbors: ----
+        :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
+        
         """
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
@@ -436,6 +439,11 @@ class HeteroCoarsener(GraphSummarizer):
     
     
     def init_step(self):
+        file_name = f"results/coarsener_{self.r}_{self.pairs_per_level}_{self.num_nearest_neighbors}_{self.num_nearest_per_etype}.pkl"
+        if os.path.exists(file_name):
+            print("Loading coarsener from file")
+            self = pickle.load(open(file_name, "rb"))
+            return 
         self.mappings = dict()
         for ntype in self.coarsened_graph.ntypes:
             self.mappings[ntype] = list()
@@ -447,7 +455,8 @@ class HeteroCoarsener(GraphSummarizer):
         self.merge_edges = self._costs_of_merges(union)
         self._init_merge_graph(self.merge_edges)
         self.candidates = self._find_lowest_cost_edges()
-        #pickle.dump(self, open("coarsener.pkl", "wb"))
+   
+        pickle.dump(self, open(file_name, "wb"))
     
     
     def iteration_step(self):
