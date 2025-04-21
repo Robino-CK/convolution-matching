@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp"
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -43,6 +43,7 @@ class HeteroCoarsener(GraphSummarizer):
         :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
         
         """
+        self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
         self.pca_components = 3
@@ -181,7 +182,8 @@ class HeteroCoarsener(GraphSummarizer):
             (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
             )   
         kd_tree = scipy.spatial.KDTree(H)
-        distances, nearest_neighbors =  kd_tree.query(H, k=self.num_nearest_per_etype, p=1, eps=0.01, workers=1) # TODO
+        k = min (self.num_nearest_per_etype, H.shape[0])
+        distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
         return (distances, nearest_neighbors)
             
             
@@ -439,7 +441,7 @@ class HeteroCoarsener(GraphSummarizer):
     
     
     def init_step(self):
-        file_name = f"results/coarsener_{self.r}_{self.pairs_per_level}_{self.num_nearest_neighbors}_{self.num_nearest_per_etype}.pkl"
+        file_name = f"results/coarsener_{self.filename}_{self.r}_{self.pairs_per_level}_{self.num_nearest_neighbors}_{self.num_nearest_per_etype}.pkl"
         if os.path.exists(file_name):
             print("Loading coarsener from file")
             self = pickle.load(open(file_name, "rb"))
@@ -461,6 +463,8 @@ class HeteroCoarsener(GraphSummarizer):
     
     def iteration_step(self):
         for ntype, merge_list in self.candidates.items():
+            if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
+                continue
             self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
             self.mappings[ntype].append(mapping)
                 
@@ -484,8 +488,8 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
+coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=20, num_nearest_neighbors=30,pairs_per_level=50)
 
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_neighbors=2)
-# coarsener.summarize()
+coarsener.summarize()
