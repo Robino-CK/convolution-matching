@@ -394,28 +394,87 @@ class HeteroCoarsener(GraphSummarizer):
             nodes_need_edge_recalc.add(node2)
             
             g.remove_nodes([pre_node1, pre_node2]) 
-                
+        
+        inverse_mapping =  {v.item(): k for k, v in enumerate(mapping)}
         # TODO maybe neighbors of neighbors of neighbrs
-        for old_node in nodes_need_edge_recalc:
-            node1 = mapping[old_node]
+        l = dict()
+        edges_thingy = torch.zeros(g.edata["edge_weight"].shape)
+        for node in nodes_need_edge_recalc:
+            node1 = mapping[node].item()
+            l[node1] = list()
             for node2 in g.successors(node1):
-                node1_feat = self.coarsened_graph.nodes[ntype].data["feat"][node1]
-                node2_feat = self.coarsened_graph.nodes[ntype].data["feat"][node2]
-                new_feat =  (node1_feat - node2_feat) / 2
-                costs = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
+                l[node1].append(node2.item())
+        feat = self.coarsened_graph.nodes[ntype].data["feat"]
+        
+        # Prepare list of node pairs to compare
+        pairs = [(node1, node2)
+                for node1, merge_candidates in l.items()
+                for node2 in merge_candidates
+                if node1 != node2]
+
+        if pairs:
+            node1_ids, node2_ids = zip(*pairs)
+            node1_feats = feat[list(node1_ids)]
+            node2_feats = feat[list(node2_ids)]
+
+            new_feats = (node1_feats - node2_feats) / 2
+            costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
+
+            for (node1, node2), cost in zip(pairs, costs):
+                    edge_id = g.edge_ids(node1, node2)
+                
+                    edges_thingy[edge_id] += cost
+
+
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            if src_type != ntype:
+                continue
+            H_merged = self._create_h_via_cache_vec(l, etype)
+            for node1, merge_candidates in l.items(): # TODO: vectorize
+                node1_repr = self.H_originals_stacked[etype][node1]                # shape: [hidden_dim]
+                node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
+                node2_repr = self.H_originals_stacked[etype][node2_indices]       # shape: [num_candidates, hidden_dim]
+                merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
+
+                # Compute cost: L1 distance from node1 to merged and node2 to merged
+                cost_node1 = torch.norm(node1_repr.unsqueeze(0) - merged_repr, p=1, dim=1)  # [num_candidates]
+                cost_node2 = torch.norm(node2_repr - merged_repr, p=1, dim=1)               # [num_candidates]
+                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
+
+                for node2, cost in zip(merge_candidates, total_cost):
+                    edge_id = g.edge_ids(node1, node2)
+                
+                    g.edata["edge_weight"][edge_id] = cost#.type(torch.FloatTensor)
+        
+
+
+            
+      
+        
+        
+        # for old_node in nodes_need_edge_recalc:
+        #     node1 = mapping[old_node]
+            
+        #     for node2 in g.successors(node1):
+                
+                
+        #         node1_feat = self.coarsened_graph.nodes[ntype].data["feat"][node1]
+        #         node2_feat = self.coarsened_graph.nodes[ntype].data["feat"][node2]
+        #         new_feat =  (node1_feat - node2_feat) / 2
+        #         costs = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
                     
-                for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                    if src_type != ntype:
-                        continue
-                    H_type_orig = self.H_originals_stacked[etype]
+        #         for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
+        #             if src_type != ntype:
+        #                 continue
+        #             H_type_orig = self.H_originals_stacked[etype]
                     
-                    h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph,  node1.item(), (src_type, etype, dst_type), node2.item())
+        #             h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph,  node1.item(), (src_type, etype, dst_type), node2.item())
                     
                     
                     
-                    costs += torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
-                edge_id = g.edge_ids(node1, node2)
-                g.edata["edge_weight"][edge_id] = costs#.type(torch.FloatTensor)
+        #             costs += torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
+        #         edge_id = g.edge_ids(node1, node2)
+        #         g.edata["edge_weight"][edge_id] = costs#.type(torch.FloatTensor)
         
               
         print("update merge graph", time.time()- start_time)       
@@ -584,9 +643,9 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-dataset = DBLP() 
+# dataset = DBLP() 
 
-original_graph = dataset.load_graph()
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
+# original_graph = dataset.load_graph()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
-coarsener.summarize()
+# coarsener.summarize()
