@@ -457,26 +457,51 @@ class HeteroCoarsener(GraphSummarizer):
         start_time = time.time()
         
         costs_dict_2 = dict()
+        costs_dict = dict()
         #test = [("author", "authortopaper", "paper")]
         #for src_type,etype,dst_type in test:
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             print(src_type, etype, dst_type)
             if not src_type in costs_dict_2:
                 costs_dict_2[src_type] = dict()
+                
+            if not src_type in costs_dict:
+                costs_dict[src_type] = dict()
             time_1 = time.time()
             H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype)
+
+
+            
             print("vectorized", time.time() - time_1)
             time_1 = time.time()
-            
+            for node1, merge_candidates in merge_list[src_type].items():
+                node1_repr = self.H_originals_stacked[etype][node1]                # shape: [hidden_dim]
+                node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
+                node2_repr = self.H_originals_stacked[etype][node2_indices]       # shape: [num_candidates, hidden_dim]
+                merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
 
-            for node1 , merge_candidates in merge_list[src_type].items():
-                for idx,node2 in enumerate(merge_candidates):
-                    costs = torch.norm(self.H_originals_stacked[etype][node1] - H_merged[node1][idx],1)
-                    costs += torch.norm(self.H_originals_stacked[etype][node2] - H_merged[node1][idx],1)
-                    if (node1, node2) in costs_dict_2[src_type].keys():
-                        costs_dict_2[src_type][(node1, node2)] += costs
+                # Compute cost: L1 distance from node1 to merged and node2 to merged
+                cost_node1 = torch.norm(node1_repr.unsqueeze(0) - merged_repr, p=1, dim=1)  # [num_candidates]
+                cost_node2 = torch.norm(node2_repr - merged_repr, p=1, dim=1)               # [num_candidates]
+                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
+
+                for node2, cost in zip(merge_candidates, total_cost):
+                    if node1 == node2:
+                        continue
+                    key = (node1, node2)
+                    if key in costs_dict[src_type]:
+                        costs_dict[src_type][key] += cost
                     else:
-                        costs_dict_2[src_type][(node1, node2)] = costs
+                        costs_dict[src_type][key] = cost
+
+            # for node1 , merge_candidates in merge_list[src_type].items():
+            #     for idx,node2 in enumerate(merge_candidates):
+            #         costs = torch.norm(self.H_originals_stacked[etype][node1] - H_merged[node1][idx],1)
+            #         costs += torch.norm(self.H_originals_stacked[etype][node2] - H_merged[node1][idx],1)
+            #         if (node1, node2) in costs_dict_2[src_type].keys():
+            #             costs_dict_2[src_type][(node1, node2)] += costs
+            #         else:
+            #             costs_dict_2[src_type][(node1, node2)] = costs
             print("costs", time.time() - time_1)
         print("costs of merges", time.time() - start_time)
         return costs_dict_2 
@@ -546,9 +571,9 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-dataset = DBLP() 
+# dataset = DBLP() 
 
-original_graph = dataset.load_graph()
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
+# original_graph = dataset.load_graph()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
-coarsener.summarize()
+# coarsener.summarize()
