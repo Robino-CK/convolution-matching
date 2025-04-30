@@ -3,6 +3,8 @@ import dgl
 import numpy as np
 import os
 import sys
+from collections import defaultdict
+
 import time
 import torch
 import sklearn
@@ -80,19 +82,6 @@ class HeteroCoarsener(GraphSummarizer):
             }
             
    
-            
-    def _create_h_spatial_via_cache_for_node(self, g_orig, node, conical_type, node2):
-        cache = self.H_originals
-        s_u = cache[conical_type[1]][node]  
-        s_v = cache[conical_type[1]][node2]
-        d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
-        d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
-        d_u_v = d_u + d_v 
-        # TODO
-        #k = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type)))  + 1 
-     
-        h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
-        return h
     
         
     def _create_h_spatial_rgcn(self, g):
@@ -433,41 +422,68 @@ class HeteroCoarsener(GraphSummarizer):
         return g, mapping     
    
     
+    
+            
+    def _create_h_spatial_via_cache_for_node(self, g_orig, node, conical_type, node2):
+        cache = self.H_originals
+        s_u = cache[conical_type[1]][node]  
+        s_v = cache[conical_type[1]][node2]
+        d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
+        d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
+        d_u_v = d_u + d_v 
+        # TODO
+        #k = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type)))  + 1 
+     
+        h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
+        return h
+    
+    def _create_h_via_cache_vec(self,  table, etype):
+        cache = self.H_originals_stacked
+       # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
+        H_merged = dict()
+        
+       # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
+        for node1, merge_nodes in table.items():
+            merge_nodes = torch.tensor(list(merge_nodes))
+            smth = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1) + 1)
+            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] + 1) + smth
+            h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + 2 + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
+            H_merged[node1] = h
+        
+        return H_merged
             
             
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
         
-        costs_dict = dict()
-        for node_type, rgcn_table in merge_list.items():
-            costs_dict[node_type] = dict()
-            for node1, merge_candidates in tqdm(rgcn_table.items(), "calculate H_coarsen"):
-                for node2 in merge_candidates:
-                    if node1 == node2:
-                        continue
-                    node1_feat = self.coarsened_graph.nodes[node_type].data["feat"][node1]
-                    node2_feat = self.coarsened_graph.nodes[node_type].data["feat"][node2]
-                    new_feat =  (node1_feat - node2_feat) / 2
-                    costs_dict[node_type][(node1, node2)] = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
-                    for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                        if src_type != node_type:
-                            continue
-                        
-                        H_type_orig = self.H_originals_stacked[etype]
-                
-                    
-                        h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph, node1, (src_type, etype, dst_type), node2)
-                        costs = torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
-                        if (node1, node2) in costs_dict[node_type].keys():
-                            costs_dict[node_type][(node1, node2)] += costs
-                        else:
-                            costs_dict[node_type][(node1, node2)] = costs
+        costs_dict_2 = dict()
+        #test = [("author", "authortopaper", "paper")]
+        #for src_type,etype,dst_type in test:
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            print(src_type, etype, dst_type)
+            if not src_type in costs_dict_2:
+                costs_dict_2[src_type] = dict()
+            time_1 = time.time()
+            H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype)
+            print("vectorized", time.time() - time_1)
+            time_1 = time.time()
             
-            
-            
-            
+
+            for node1 , merge_candidates in merge_list[src_type].items():
+                for idx,node2 in enumerate(merge_candidates):
+                    costs = torch.norm(self.H_originals_stacked[etype][node1] - H_merged[node1][idx],1)
+                    costs += torch.norm(self.H_originals_stacked[etype][node2] - H_merged[node1][idx],1)
+                    if (node1, node2) in costs_dict_2[src_type].keys():
+                        costs_dict_2[src_type][(node1, node2)] += costs
+                    else:
+                        costs_dict_2[src_type][(node1, node2)] = costs
+            print("costs", time.time() - time_1)
         print("costs of merges", time.time() - start_time)
-        return costs_dict
+        return costs_dict_2 
+            
+            
+            
+        
        
     
     def _get_master_mapping(self, mappings, ntype):
@@ -530,9 +546,9 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-# dataset = DBLP() 
+dataset = DBLP() 
 
-# original_graph = dataset.load_graph()
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
+original_graph = dataset.load_graph()
+coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
-# coarsener.summarize()
+coarsener.summarize()
