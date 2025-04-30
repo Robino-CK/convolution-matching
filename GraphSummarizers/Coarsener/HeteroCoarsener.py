@@ -426,10 +426,10 @@ class HeteroCoarsener(GraphSummarizer):
                     
                     costs += torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
                 edge_id = g.edge_ids(node1, node2)
-                g.edata["edge_weight"][edge_id] = costs
+                g.edata["edge_weight"][edge_id] = costs#.type(torch.FloatTensor)
         
               
-        print("update nerge graph", time.time()- start_time)       
+        print("update merge graph", time.time()- start_time)       
         return g, mapping     
    
     
@@ -443,6 +443,8 @@ class HeteroCoarsener(GraphSummarizer):
             costs_dict[node_type] = dict()
             for node1, merge_candidates in tqdm(rgcn_table.items(), "calculate H_coarsen"):
                 for node2 in merge_candidates:
+                    if node1 == node2:
+                        continue
                     node1_feat = self.coarsened_graph.nodes[node_type].data["feat"][node1]
                     node2_feat = self.coarsened_graph.nodes[node_type].data["feat"][node2]
                     new_feat =  (node1_feat - node2_feat) / 2
@@ -497,7 +499,8 @@ class HeteroCoarsener(GraphSummarizer):
         self._init_merge_graph(self.merge_edges)
         self.candidates = self._find_lowest_cost_edges()
    
-        pickle.dump(self, open(file_name, "wb"))
+   
+   #     pickle.dump(self, open(file_name, "wb"))
     
     
     def iteration_step(self):
@@ -528,7 +531,8 @@ class HeteroCoarsener(GraphSummarizer):
         
 
 # dataset = DBLP() 
+
 # original_graph = dataset.load_graph()
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=20, num_nearest_neighbors=30,pairs_per_level=50)
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
 # coarsener.summarize()

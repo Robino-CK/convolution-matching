@@ -3,7 +3,9 @@ from dgl import heterograph
 import dgl
 import torch_geometric.transforms as T
 import torch_geometric
+from sklearn.decomposition import PCA
 
+from sklearn.preprocessing import MinMaxScaler
 import dgl
 import os
 import sys
@@ -64,7 +66,14 @@ class DBLP():
         for ntype in g.ntypes:
             if ntype == "conference":
                 g.nodes[ntype].data['feat'] = torch.ones(num_nodes_dict['conference'],1)    
-            #if 'x' in data.x_dict[ntype]:
+            elif ntype == "author":
+                pca = PCA(n_components=10)
+                pca_feat = pca.fit_transform((data.x_dict[ntype] - data.x_dict[ntype].mean(dim=0)) / (data.x_dict[ntype].std(dim=0) + 0.0001))
+                scaler = MinMaxScaler()
+
+            # Normalize the features between 0 and 1
+                normalized_features = scaler.fit_transform(pca_feat)
+                g.nodes[ntype].data['feat'] = torch.from_numpy(normalized_features).type(torch.FloatTensor)
             else:
                 g.nodes[ntype].data['feat'] = data.x_dict[ntype]
         g.nodes["author"].data['label'] = data["author"].y
