@@ -144,7 +144,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.merge_graphs =dict()
         for ntype in self.coarsened_graph.ntypes:
             num_nodes = self.coarsened_graph.number_of_nodes(ntype=ntype) 
-            num_edges = num_nodes * self.num_nearest_per_etype * len(self.coarsened_graph.canonical_etypes)
+            num_edges = num_nodes * self.num_nearest_per_etype * (len(self.coarsened_graph.canonical_etypes) + 1)
             self.merge_graphs [ntype] = dgl.graph(([], []), num_nodes=self.coarsened_graph.number_of_nodes(ntype=ntype))
             edge_weight_tensor = torch.empty(num_edges) #torch.empty((1,0)).squeeze()
             edge_tensor = torch.empty((2, num_edges), dtype=torch.int64)
@@ -185,7 +185,25 @@ class HeteroCoarsener(GraphSummarizer):
         k = min (self.num_nearest_per_etype, H.shape[0])
         distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
         return (distances, nearest_neighbors)
+    
+    
+    def _init_calculate_clostest_features(self, ntype):
+        if "feat" in self.coarsened_graph.nodes[ntype].data:
+            H = torch.zeros(( len(self.coarsened_graph.nodes(ntype)),  self.coarsened_graph.nodes[ntype].data["feat"].shape[1]))
+        else:
+            H = torch.zeros(( len(self.coarsened_graph.nodes(ntype)), 1))
+        for node in self.coarsened_graph.nodes(ntype):
             
+            H[node.item(),:] = self.coarsened_graph.nodes[ntype].data["feat"][node.item()]
+        if H.shape[1] > self.pca_components:
+            pca = PCA(n_components=self.pca_components)
+            H = pca.fit_transform(
+            (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
+            )   
+        kd_tree = scipy.spatial.KDTree(H)
+        k = min (self.num_nearest_per_etype, H.shape[0])
+        distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
+        return (distances, nearest_neighbors)        
             
     
     def _get_union(self, init_costs):
@@ -203,6 +221,12 @@ class HeteroCoarsener(GraphSummarizer):
                 else:
                     
                     closest_over_all_etypes[src_type][node.item()] = set(closest_over_all_etypes[src_type][node.item()]).union(nearest_neighbor)
+        for ntype in self.coarsened_graph.ntypes:
+            for node in self.coarsened_graph.nodes(ntype):
+                if node.item() not in closest_over_all_etypes[ntype]:
+                    closest_over_all_etypes[ntype][node.item()] = list(init_costs[ntype][1][node.item()])
+                else:
+                    closest_over_all_etypes[ntype][node.item()] = set(closest_over_all_etypes[ntype][node.item()]).union(list(init_costs[ntype][1][node.item()]))
         print("stop intersection", time.time() - start_time)
         return closest_over_all_etypes
 
@@ -216,10 +240,10 @@ class HeteroCoarsener(GraphSummarizer):
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
            init_costs[etype] = self._init_calculate_clostest_edges(src_type, etype, dst_type)
         
-        # for ntype in self.coarsened_graph.ntypes:
-        #     if "feat" in self.coarsened_graph.nodes[dst_type].data:
-        #         if not src_type in init_costs:
-        #             init_costs[src_type] = dict()    
+        for ntype in self.coarsened_graph.ntypes:
+            if "feat" in self.coarsened_graph.nodes[dst_type].data:
+                
+                init_costs[ntype] = self._init_calculate_clostest_features(ntype)    
               
         
         print("stop init costs", time.time() - start_time)
@@ -386,14 +410,21 @@ class HeteroCoarsener(GraphSummarizer):
         for old_node in nodes_need_edge_recalc:
             node1 = mapping[old_node]
             for node2 in g.successors(node1):
-                costs = 0
+                node1_feat = self.coarsened_graph.nodes[ntype].data["feat"][node1]
+                node2_feat = self.coarsened_graph.nodes[ntype].data["feat"][node2]
+                new_feat =  (node1_feat - node2_feat) / 2
+                costs = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
+                    
                 for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
                     if src_type != ntype:
                         continue
                     H_type_orig = self.H_originals_stacked[etype]
                     
                     h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph,  node1.item(), (src_type, etype, dst_type), node2.item())
-                    costs += torch.norm(h_uv - H_type_orig[node1], 2) + torch.norm(h_uv - H_type_orig[node2], 2)
+                    
+                    
+                    
+                    costs += torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
                 edge_id = g.edge_ids(node1, node2)
                 g.edata["edge_weight"][edge_id] = costs
         
@@ -410,21 +441,29 @@ class HeteroCoarsener(GraphSummarizer):
         costs_dict = dict()
         for node_type, rgcn_table in merge_list.items():
             costs_dict[node_type] = dict()
-            for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                if src_type != node_type:
-                        continue
+            for node1, merge_candidates in tqdm(rgcn_table.items(), "calculate H_coarsen"):
+                for node2 in merge_candidates:
+                    node1_feat = self.coarsened_graph.nodes[node_type].data["feat"][node1]
+                    node2_feat = self.coarsened_graph.nodes[node_type].data["feat"][node2]
+                    new_feat =  (node1_feat - node2_feat) / 2
+                    costs_dict[node_type][(node1, node2)] = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
+                    for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
+                        if src_type != node_type:
+                            continue
+                        
+                        H_type_orig = self.H_originals_stacked[etype]
                 
-                H_type_orig = self.H_originals_stacked[etype]
-                
-                for node1, merge_candidates in tqdm(rgcn_table.items(), "calculate H_coarsen"):
-                    for node2 in merge_candidates:
                     
                         h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph, node1, (src_type, etype, dst_type), node2)
-                        costs = torch.norm(h_uv - H_type_orig[node1], 2) + torch.norm(h_uv - H_type_orig[node2], 2)
+                        costs = torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
                         if (node1, node2) in costs_dict[node_type].keys():
                             costs_dict[node_type][(node1, node2)] += costs
                         else:
                             costs_dict[node_type][(node1, node2)] = costs
+            
+            
+            
+            
         print("costs of merges", time.time() - start_time)
         return costs_dict
        
@@ -488,8 +527,8 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=20, num_nearest_neighbors=30,pairs_per_level=50)
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=20, num_nearest_neighbors=30,pairs_per_level=50)
 
-coarsener.summarize()
+# coarsener.summarize()
