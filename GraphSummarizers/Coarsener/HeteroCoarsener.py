@@ -3,6 +3,8 @@ import dgl
 import numpy as np
 import os
 import sys
+from collections import defaultdict
+
 import time
 import torch
 import sklearn
@@ -80,24 +82,10 @@ class HeteroCoarsener(GraphSummarizer):
             }
             
    
-            
-    def _create_h_spatial_via_cache_for_node(self, g_orig, node, conical_type, node2):
-        cache = self.H_originals
-        s_u = cache[conical_type[1]][node]  
-        s_v = cache[conical_type[1]][node2]
-        d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
-        d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
-        d_u_v = d_u + d_v 
-        # TODO
-        #k = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type)))  + 1 
-     
-        h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
-        return h
     
         
     def _create_h_spatial_rgcn(self, g):
         start_time = time.time()
-        print("start create H")
         H = dict()
         
         device = "cpu"
@@ -134,12 +122,12 @@ class HeteroCoarsener(GraphSummarizer):
                     H[etype][node.item()] += degree_inv_src[node] * degree_inv_dest[neigh] * feat
             self.H_originals_stacked[etype] = torch.stack(list(H[etype].values()))
         self.H_originals = H
-        print("created H", time.time() - start_time )  
+        print("_create_h_spatial_rgcn", time.time() - start_time )  
     
     
     
     def _init_merge_graph(self, costs):
-        print("start init merge graph")
+       
         start_time = time.time()
         self.merge_graphs =dict()
         for ntype in self.coarsened_graph.ntypes:
@@ -164,8 +152,8 @@ class HeteroCoarsener(GraphSummarizer):
             self.merge_graphs[ntype].add_edges(edge_tensor[0], edge_tensor[1])
             self.merge_graphs[ntype].edata["edge_weight"] = torch.tensor(edge_weight_tensor)
             self.merge_graphs[ntype].edata["node_size"] = torch.ones(edge_weight_tensor.shape[0])
-            print("created merge graph for type", ntype)
-        print("stop init merge graph", time.time() - start_time)
+            
+        print("_init_merge_graph", time.time() - start_time)
 
     
     def _init_calculate_clostest_edges(self, src_type, etype, dst_type):
@@ -227,7 +215,7 @@ class HeteroCoarsener(GraphSummarizer):
                     closest_over_all_etypes[ntype][node.item()] = list(init_costs[ntype][1][node.item()])
                 else:
                     closest_over_all_etypes[ntype][node.item()] = set(closest_over_all_etypes[ntype][node.item()]).union(list(init_costs[ntype][1][node.item()]))
-        print("stop intersection", time.time() - start_time)
+        print("_get_union", time.time() - start_time)
         return closest_over_all_etypes
 
     
@@ -352,31 +340,13 @@ class HeteroCoarsener(GraphSummarizer):
             g.remove_nodes([pre_node1, pre_node2], ntype=node_type) 
             
                 
-        print("stop merging nodes", time.time()- start_time)       
+        print("_merge_nodes", time.time()- start_time)       
         return g, mapping     
    
-
-
-    
-    def _update_merge_graph(self, go,  node_pairs, ntype):
-        """
-        Merge multiple node pairs in a heterogeneous DGL graph.
-
-        Args:
-            g (dgl.DGLHeteroGraph): The input graph.
-            node_type (str): The node type of the nodes to merge.
-            node_pairs (list of tuple): List of (node1, node2) pairs to merge.
-            feat_key (str): The feature key to average.
-
-        Returns:
-            new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
-            mapping (dict): Mapping from original node IDs to supernode ID.
-        """
-        start_time = time.time()
-        g = deepcopy(go)
-        
+   
+    def _update_merge_graph_nodes_edges(self, g, node_pairs):
         mapping = torch.arange(0, g.num_nodes() )
-        nodes_need_edge_recalc = set()
+        nodes_need_edge_weight_recalc = set()
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
             g.add_nodes(1)
             new_node_id =  g.num_nodes() -1
@@ -401,73 +371,180 @@ class HeteroCoarsener(GraphSummarizer):
             else:
                 mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
                 mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
-            nodes_need_edge_recalc.add(node1)
-            nodes_need_edge_recalc.add(node2)
+            nodes_need_edge_weight_recalc.add(node1)
+            nodes_need_edge_weight_recalc.add(node2)
             
             g.remove_nodes([pre_node1, pre_node2]) 
-                
-        # TODO maybe neighbors of neighbors of neighbrs
-        for old_node in nodes_need_edge_recalc:
-            node1 = mapping[old_node]
+        return g, mapping, nodes_need_edge_weight_recalc
+
+    def _update_merge_graph_edge_weights(self,g, ntype, mapping, nodes_need_edge_weight_recalc ):
+        l = dict()
+        edges_thingy = torch.zeros(g.edata["edge_weight"].shape)
+        for node in nodes_need_edge_weight_recalc:
+            node1 = mapping[node].item()
+            l[node1] = list()
             for node2 in g.successors(node1):
-                node1_feat = self.coarsened_graph.nodes[ntype].data["feat"][node1]
-                node2_feat = self.coarsened_graph.nodes[ntype].data["feat"][node2]
-                new_feat =  (node1_feat - node2_feat) / 2
-                costs = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
-                    
-                for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                    if src_type != ntype:
-                        continue
-                    H_type_orig = self.H_originals_stacked[etype]
-                    
-                    h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph,  node1.item(), (src_type, etype, dst_type), node2.item())
-                    
-                    
-                    
-                    costs += torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
-                edge_id = g.edge_ids(node1, node2)
-                g.edata["edge_weight"][edge_id] = costs#.type(torch.FloatTensor)
+                l[node1].append(node2.item())
+        feat = self.coarsened_graph.nodes[ntype].data["feat"]
         
-              
-        print("update merge graph", time.time()- start_time)       
+        # Prepare list of node pairs to compare
+        pairs = [(node1, node2)
+                for node1, merge_candidates in l.items()
+                for node2 in merge_candidates
+                if node1 != node2]
+
+        if pairs:
+            node1_ids, node2_ids = zip(*pairs)
+            node1_feats = feat[list(node1_ids)]
+            node2_feats = feat[list(node2_ids)]
+
+            new_feats = (node1_feats - node2_feats) / 2
+            costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
+
+            for (node1, node2), cost in zip(pairs, costs):
+                    edge_id = g.edge_ids(node1, node2)
+                
+                    edges_thingy[edge_id] += cost
+
+
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            if src_type != ntype:
+                continue
+            H_merged = self._create_h_via_cache_vec(l, etype)
+            for node1, merge_candidates in l.items(): # TODO: vectorize
+                node1_repr = self.H_originals_stacked[etype][node1]                # shape: [hidden_dim]
+                node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
+                node2_repr = self.H_originals_stacked[etype][node2_indices]       # shape: [num_candidates, hidden_dim]
+                merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
+
+                # Compute cost: L1 distance from node1 to merged and node2 to merged
+                cost_node1 = torch.norm(node1_repr.unsqueeze(0) - merged_repr, p=1, dim=1)  # [num_candidates]
+                cost_node2 = torch.norm(node2_repr - merged_repr, p=1, dim=1)               # [num_candidates]
+                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
+
+                for node2, cost in zip(merge_candidates, total_cost):
+                    edge_id = g.edge_ids(node1, node2)
+                
+                    g.edata["edge_weight"][edge_id] = cost#.type(torch.FloatTensor)
+                    
+    
+    def _update_merge_graph(self, go,  node_pairs, ntype):
+        """
+        Merge multiple node pairs in a heterogeneous DGL graph.
+
+        Args:
+            g (dgl.DGLHeteroGraph): The input graph.
+            node_type (str): The node type of the nodes to merge.
+            node_pairs (list of tuple): List of (node1, node2) pairs to merge.
+            feat_key (str): The feature key to average.
+
+        Returns:
+            new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
+            mapping (dict): Mapping from original node IDs to supernode ID.
+        """
+        start_time = time.time()
+        
+        g = deepcopy(go)
+        
+        g, mapping , nodes_need_edge_weight_recalc = self._update_merge_graph_nodes_edges(g, node_pairs)
+        self._update_merge_graph_edge_weights(g,ntype,mapping,nodes_need_edge_weight_recalc)
+        
+        print("_update_merge_graph: edge weight update", time.time()- start_time)       
         return g, mapping     
    
     
+    
             
+    def _create_h_spatial_via_cache_for_node(self, g_orig, node, conical_type, node2):
+        cache = self.H_originals
+        s_u = cache[conical_type[1]][node]  
+        s_v = cache[conical_type[1]][node2]
+        d_u = self.node_degrees[conical_type[1]]["out"][node] + 1
+        d_v = self.node_degrees[conical_type[1]]["out"][node2] + 1
+        d_u_v = d_u + d_v 
+        # TODO
+        #k = len(set(g_orig.successors(node, etype=conical_type)) & set(g_orig.successors(node2, etype=conical_type)))  + 1 
+     
+        h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
+        return h
+    
+    def _create_h_via_cache_vec(self,  table, etype):
+        cache = self.H_originals_stacked
+       # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
+        H_merged = dict()
+        
+       # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
+        for node1, merge_nodes in table.items(): # TODO: vectorize
+            merge_nodes = torch.tensor(list(merge_nodes))
+            smth = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1) + 1)
+            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] + 1) + smth
+            h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + 2 + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
+            H_merged[node1] = h
+        
+        return H_merged
+    
+    
+    def _feature_costs(self, costs_dict, merge_list):
+        for ntype in self.coarsened_graph.ntypes:
+            feat = self.coarsened_graph.nodes[ntype].data["feat"]
+            costs_dict[ntype] = dict()
+            # Prepare list of node pairs to compare
+            pairs = [(node1, node2)
+                    for node1, merge_candidates in merge_list[ntype].items()
+                    for node2 in merge_candidates
+                    if node1 != node2]
+
+            if pairs:
+                node1_ids, node2_ids = zip(*pairs)
+                node1_feats = feat[list(node1_ids)]
+                node2_feats = feat[list(node2_ids)]
+
+                new_feats = (node1_feats - node2_feats) / 2
+                costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
+
+                for (node1, node2), cost in zip(pairs, costs):
+                    costs_dict[ntype][(node1, node2)] = cost
+    
+    def _neighbor_h_costs(self, costs_dict, merge_list):
+        
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+                
+            if not src_type in costs_dict:
+                costs_dict[src_type] = dict()
+            H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype)
+
+
             
+            for node1, merge_candidates in merge_list[src_type].items(): # TODO: vectorize
+                node1_repr = self.H_originals_stacked[etype][node1]                # shape: [hidden_dim]
+                node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
+                node2_repr = self.H_originals_stacked[etype][node2_indices]       # shape: [num_candidates, hidden_dim]
+                merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
+
+                # Compute cost: L1 distance from node1 to merged and node2 to merged
+                cost_node1 = torch.norm(node1_repr.unsqueeze(0) - merged_repr, p=1, dim=1)  # [num_candidates]
+                cost_node2 = torch.norm(node2_repr - merged_repr, p=1, dim=1)               # [num_candidates]
+                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
+
+                for node2, cost in zip(merge_candidates, total_cost):
+                    if node1 == node2:
+                        continue
+                    key = (node1, node2)
+                    costs_dict[src_type][key] += cost
+                    
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
         
         costs_dict = dict()
-        for node_type, rgcn_table in merge_list.items():
-            costs_dict[node_type] = dict()
-            for node1, merge_candidates in tqdm(rgcn_table.items(), "calculate H_coarsen"):
-                for node2 in merge_candidates:
-                    if node1 == node2:
-                        continue
-                    node1_feat = self.coarsened_graph.nodes[node_type].data["feat"][node1]
-                    node2_feat = self.coarsened_graph.nodes[node_type].data["feat"][node2]
-                    new_feat =  (node1_feat - node2_feat) / 2
-                    costs_dict[node_type][(node1, node2)] = torch.norm(new_feat - node1_feat, 1) + torch.norm(new_feat - node2_feat, 1)
-                    for src_type,etype,dst_type in self.coarsened_graph.canonical_etypes:
-                        if src_type != node_type:
-                            continue
-                        
-                        H_type_orig = self.H_originals_stacked[etype]
-                
-                    
-                        h_uv = self._create_h_spatial_via_cache_for_node(self.coarsened_graph, node1, (src_type, etype, dst_type), node2)
-                        costs = torch.norm(h_uv - H_type_orig[node1], 1) + torch.norm(h_uv - H_type_orig[node2], 1)
-                        if (node1, node2) in costs_dict[node_type].keys():
-                            costs_dict[node_type][(node1, node2)] += costs
-                        else:
-                            costs_dict[node_type][(node1, node2)] = costs
+        self._feature_costs(costs_dict, merge_list)
+        self._neighbor_h_costs(costs_dict, merge_list)    
+        
+        print("_costs_of_merges", time.time() - start_time)
+        return costs_dict 
             
             
             
-            
-        print("costs of merges", time.time() - start_time)
-        return costs_dict
+        
        
     
     def _get_master_mapping(self, mappings, ntype):
