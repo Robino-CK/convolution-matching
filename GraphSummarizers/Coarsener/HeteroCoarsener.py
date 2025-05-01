@@ -384,8 +384,8 @@ class HeteroCoarsener(GraphSummarizer):
 
         # 1) Build flat src/dst lists
         keys = list(candidates.keys())
-        counts = torch.tensor([len(candidates[k]) for k in keys], device=device)
-
+        counts = torch.tensor([len(candidates[k]) for k in keys],dtype=torch.int64, device=device)
+        print(keys , counts)
         # repeat each node1 for its number of candidates
         src = torch.tensor(keys, device=device, dtype=torch.int64).repeat_interleave(counts)       # shape [E]
         # flatten all node2 lists
@@ -480,6 +480,8 @@ class HeteroCoarsener(GraphSummarizer):
             candidates_to_update[node1] = list()
             for node2 in succ:
                 candidates_to_update[node1].append(node2.item())
+                
+ 
         self._update_merge_graph_edge_weigths_features(g,ntype, candidates_to_update)
         self._update_merge_graph_edge_weights_H(g, ntype, candidates_to_update)
         print("_update_merge_graph", time.time()- start_time)       
@@ -640,9 +642,12 @@ class HeteroCoarsener(GraphSummarizer):
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
+
 # dataset = DBLP() 
-
 # original_graph = dataset.load_graph()
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
-# coarsener.summarize(400)
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=15, num_nearest_neighbors=15,pairs_per_level=15)
+# coarsener.init_step()
+# for i in range(600):
+#     print("--------- step: " , i , "---------" )
+#     coarsener.iteration_step()
