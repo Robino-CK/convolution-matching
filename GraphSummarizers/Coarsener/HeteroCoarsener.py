@@ -262,7 +262,7 @@ class HeteroCoarsener(GraphSummarizer):
                 nodes.add(src_node)
                 nodes.add(dst_node)
             topk_non_overlapping_per_type[ntype] = topk_non_overlapping
-        print("stop lowest cost edges", time.time() - start_time)
+        print("_find_lowest_cost_edges", time.time() - start_time)
         return topk_non_overlapping_per_type
 
     def _sum_edge_costs_over_etypes(self, init_costs, intersection):
@@ -377,57 +377,82 @@ class HeteroCoarsener(GraphSummarizer):
             g.remove_nodes([pre_node1, pre_node2]) 
         return g, mapping, nodes_need_edge_weight_recalc
 
-    def _update_merge_graph_edge_weights(self,g, ntype, mapping, nodes_need_edge_weight_recalc ):
-        l = dict()
-        edges_thingy = torch.zeros(g.edata["edge_weight"].shape)
-        for node in nodes_need_edge_weight_recalc:
-            node1 = mapping[node].item()
-            l[node1] = list()
-            for node2 in g.successors(node1):
-                l[node1].append(node2.item())
-        feat = self.coarsened_graph.nodes[ntype].data["feat"]
+
+    def _update_merge_graph_edge_weigths_features(self, g, ntype, candidates ):
+        edge_things = torch.zeros(g.edata['edge_weight'].shape)
+        edge_things2 = torch.zeros(g.edata['edge_weight'].shape)
+        feat = self.coarsened_graph.nodes[ntype].data['feat']
+        device = feat.device
+
+        # 1) Build flat src/dst lists
+        keys = list(candidates.keys())
+        counts = torch.tensor([len(candidates[k]) for k in keys], device=device)
+
+        # repeat each node1 for its number of candidates
+        src = torch.tensor(keys, device=device).repeat_interleave(counts)       # shape [E]
+        # flatten all node2 lists
+        dst = torch.cat([torch.tensor(candidates[k], device=device) for k in keys], dim=0)  # [E]
+
+        # 2) mask out self‐pairs (if any)
+        mask = src != dst
+        src, dst = src[mask], dst[mask]                                         # [E']
+
+        # 3) pull features and compute costs
+        f1 = feat[src]       # [E'×H]
+        f2 = feat[dst]       # [E'×H]
+        mid = (f1 - f2) / 2   # [E'×H]
+        costs = torch.norm(mid - f1, p=1, dim=1) + torch.norm(mid - f2, p=1, dim=1)  # [E']
+
+        # 4) lookup edge IDs & assign all at once
+        eids = g.edge_ids(src, dst)               # [E']
         
-        # Prepare list of node pairs to compare
-        pairs = [(node1, node2)
-                for node1, merge_candidates in l.items()
-                for node2 in merge_candidates
-                if node1 != node2]
+        g.edata['edge_weight'][eids] = costs
+        edge_things2[eids] = costs
+        
+   
 
-        if pairs:
-            node1_ids, node2_ids = zip(*pairs)
-            node1_feats = feat[list(node1_ids)]
-            node2_feats = feat[list(node2_ids)]
-
-            new_feats = (node1_feats - node2_feats) / 2
-            costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
-
-            for (node1, node2), cost in zip(pairs, costs):
-                    edge_id = g.edge_ids(node1, node2)
-                
-                    edges_thingy[edge_id] += cost
-
-
+    def _update_merge_graph_edge_weights_H(self,g, ntype, candidates):
+        
+       
+        device = "cpu"
+        
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
                 continue
-            H_merged = self._create_h_via_cache_vec(l, etype)
-            for node1, merge_candidates in l.items(): # TODO: vectorize
-                node1_repr = self.H_originals_stacked[etype][node1]                # shape: [hidden_dim]
-                node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
-                node2_repr = self.H_originals_stacked[etype][node2_indices]       # shape: [num_candidates, hidden_dim]
-                merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
+            H_merged = self._create_h_via_cache_vec(candidates, etype)
+            
+            
+            
+            # 1) Build two flat tensors src_nodes, dst_nodes of shape [E], 
+            #    where E = total number of (node1→node2) pairs.
+            counts = [len(cands) for cands in candidates.values()]
+            src_nodes = (
+                torch.tensor(list(candidates.keys()), device=device)
+                .repeat_interleave(torch.tensor(counts, device=device))
+            )                                         # [E]
+            dst_nodes = torch.cat(
+                [torch.tensor(cands, device=device) for cands in candidates.values()]
+            )                                         # [E]
 
-                # Compute cost: L1 distance from node1 to merged and node2 to merged
-                cost_node1 = torch.norm(node1_repr.unsqueeze(0) - merged_repr, p=1, dim=1)  # [num_candidates]
-                cost_node2 = torch.norm(node2_repr - merged_repr, p=1, dim=1)               # [num_candidates]
-                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
+            # 2) Build merged_repr as a big [E×H] tensor by concatenating each H_merged[node1].
+            merged_repr = torch.cat([H_merged[n] for n in candidates.keys()], dim=0)  
+            #                   → [sum(counts) × hidden_dim] == [E×H]
 
-                for node2, cost in zip(merge_candidates, total_cost):
-                    edge_id = g.edge_ids(node1, node2)
-                
-                    g.edata["edge_weight"][edge_id] = cost#.type(torch.FloatTensor)
-                    
-    
+            # 3) Lookup original reprs for every src and dst in one go:
+            src_repr = self.H_originals_stacked[etype][src_nodes]   # [E×H]
+            dst_repr = self.H_originals_stacked[etype][dst_nodes]   # [E×H]
+
+            # 4) L1 distances and total cost:
+            cost_src = torch.norm(src_repr - merged_repr, p=1, dim=1)  # [E]
+            cost_dst = torch.norm(dst_repr - merged_repr, p=1, dim=1)  # [E]
+            total_cost = cost_src + cost_dst                          # [E]
+
+            # 5) Fetch all edge IDs and write back in one shot:
+            edge_ids = g.edge_ids(src_nodes, dst_nodes)               # [E]
+            g.edata['edge_weight'][edge_ids] = total_cost
+            
+     
+
     def _update_merge_graph(self, go,  node_pairs, ntype):
         """
         Merge multiple node pairs in a heterogeneous DGL graph.
@@ -447,9 +472,16 @@ class HeteroCoarsener(GraphSummarizer):
         g = deepcopy(go)
         
         g, mapping , nodes_need_edge_weight_recalc = self._update_merge_graph_nodes_edges(g, node_pairs)
-        self._update_merge_graph_edge_weights(g,ntype,mapping,nodes_need_edge_weight_recalc)
+        candidates_to_update = dict()
         
-        print("_update_merge_graph: edge weight update", time.time()- start_time)       
+        for node in nodes_need_edge_weight_recalc:
+            node1 = mapping[node].item()
+            candidates_to_update[node1] = list()
+            for node2 in g.successors(node1):
+                candidates_to_update[node1].append(node2.item())
+        self._update_merge_graph_edge_weigths_features(g,ntype, candidates_to_update)
+        self._update_merge_graph_edge_weights_H(g, ntype, candidates_to_update)
+        print("_update_merge_graph", time.time()- start_time)       
         return g, mapping     
    
     
