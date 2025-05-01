@@ -379,8 +379,6 @@ class HeteroCoarsener(GraphSummarizer):
 
 
     def _update_merge_graph_edge_weigths_features(self, g, ntype, candidates ):
-        edge_things = torch.zeros(g.edata['edge_weight'].shape)
-        edge_things2 = torch.zeros(g.edata['edge_weight'].shape)
         feat = self.coarsened_graph.nodes[ntype].data['feat']
         device = feat.device
 
@@ -389,9 +387,9 @@ class HeteroCoarsener(GraphSummarizer):
         counts = torch.tensor([len(candidates[k]) for k in keys], device=device)
 
         # repeat each node1 for its number of candidates
-        src = torch.tensor(keys, device=device).repeat_interleave(counts)       # shape [E]
+        src = torch.tensor(keys, device=device, dtype=torch.int64).repeat_interleave(counts)       # shape [E]
         # flatten all node2 lists
-        dst = torch.cat([torch.tensor(candidates[k], device=device) for k in keys], dim=0)  # [E]
+        dst = torch.cat([torch.tensor(candidates[k], device=device, dtype=torch.int64) for k in keys], dim=0)  # [E]
 
         # 2) mask out self‐pairs (if any)
         mask = src != dst
@@ -407,7 +405,7 @@ class HeteroCoarsener(GraphSummarizer):
         eids = g.edge_ids(src, dst)               # [E']
         
         g.edata['edge_weight'][eids] = costs
-        edge_things2[eids] = costs
+        
         
    
 
@@ -476,8 +474,11 @@ class HeteroCoarsener(GraphSummarizer):
         
         for node in nodes_need_edge_weight_recalc:
             node1 = mapping[node].item()
+            succ = g.successors(node1)
+            if len(succ) == 0:
+                continue
             candidates_to_update[node1] = list()
-            for node2 in g.successors(node1):
+            for node2 in succ:
                 candidates_to_update[node1].append(node2.item())
         self._update_merge_graph_edge_weigths_features(g,ntype, candidates_to_update)
         self._update_merge_graph_edge_weights_H(g, ntype, candidates_to_update)
@@ -644,4 +645,4 @@ class HeteroCoarsener(GraphSummarizer):
 # original_graph = dataset.load_graph()
 # coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=3)
 
-# coarsener.summarize()
+# coarsener.summarize(400)
