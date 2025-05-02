@@ -385,7 +385,6 @@ class HeteroCoarsener(GraphSummarizer):
         # 1) Build flat src/dst lists
         keys = list(candidates.keys())
         counts = torch.tensor([len(candidates[k]) for k in keys],dtype=torch.int64, device=device)
-        print(keys , counts)
         # repeat each node1 for its number of candidates
         src = torch.tensor(keys, device=device, dtype=torch.int64).repeat_interleave(counts)       # shape [E]
         # flatten all node2 lists
@@ -471,7 +470,7 @@ class HeteroCoarsener(GraphSummarizer):
         
         g, mapping , nodes_need_edge_weight_recalc = self._update_merge_graph_nodes_edges(g, node_pairs)
         candidates_to_update = dict()
-        
+        # TODO: take neighboring nodes edges to other nodes into account (neighbors of neighbors) 
         for node in nodes_need_edge_weight_recalc:
             node1 = mapping[node].item()
             succ = g.successors(node1)
@@ -481,11 +480,17 @@ class HeteroCoarsener(GraphSummarizer):
             for node2 in succ:
                 candidates_to_update[node1].append(node2.item())
                 
- 
-        self._update_merge_graph_edge_weigths_features(g,ntype, candidates_to_update)
-        self._update_merge_graph_edge_weights_H(g, ntype, candidates_to_update)
-        print("_update_merge_graph", time.time()- start_time)       
-        return g, mapping     
+        if len(candidates_to_update) > 0:
+            
+            self._update_merge_graph_edge_weigths_features(g,ntype, candidates_to_update)
+            self._update_merge_graph_edge_weights_H(g, ntype, candidates_to_update)
+            print("_update_merge_graph", time.time()- start_time)    
+            return g, mapping,  True
+        else:
+            print("_update_merge_graph: WARNING no more merge candidates", time.time()- start_time)    
+            return g, mapping, False
+           
+            
    
     
     
@@ -616,16 +621,19 @@ class HeteroCoarsener(GraphSummarizer):
     
     
     def iteration_step(self):
+        isNewMerges = False
         for ntype, merge_list in self.candidates.items():
             if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
                 continue
             self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
             self.mappings[ntype].append(mapping)
                 
-            self.merge_graphs[ntype],_ = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
-                
+            self.merge_graphs[ntype],_, isNewMergesPerType = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
+            isNewMerges = isNewMerges or isNewMergesPerType
+            
+            
         self.candidates = self._find_lowest_cost_edges()
-
+        return isNewMerges
 
     def summarize(self, num_steps=20):
         
@@ -646,7 +654,7 @@ class HeteroCoarsener(GraphSummarizer):
 # dataset = DBLP() 
 # original_graph = dataset.load_graph()
 
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=15, num_nearest_neighbors=15,pairs_per_level=15)
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
 # coarsener.init_step()
 # for i in range(600):
 #     print("--------- step: " , i , "---------" )
