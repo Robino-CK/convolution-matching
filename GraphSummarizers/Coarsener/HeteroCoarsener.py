@@ -28,6 +28,7 @@ import dgl
 import torch
 from scipy.sparse import coo_matrix
 import scipy
+from collections import Counter
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
@@ -62,6 +63,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.type_homo_mapping = dict()
         self.H_originals_stacked = dict()
         self.H_originals = dict()
+        self.label_list_supernodes = dict()
         self.init_node_info()
         
     
@@ -301,8 +303,8 @@ class HeteroCoarsener(GraphSummarizer):
         """
         start_time = time.time()
         g = deepcopy(g)
-        
         mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
+        old_label_list = self.label_list_supernodes.copy()
         
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
             g.add_nodes(1, ntype=node_type)
@@ -323,8 +325,8 @@ class HeteroCoarsener(GraphSummarizer):
             if "feat" in g.nodes[node_type].data:
                 old_feats = g.nodes[node_type].data["feat"] 
                 g.nodes[node_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] + old_feats[mapping[node2]]) / 2
-            if "label" in g.nodes[node_type].data:
-                g.nodes[node_type].data["label"][new_node_id] = g.nodes[node_type].data["label"][mapping[node1]]
+            # if "label" in g.nodes[node_type].data:
+            #     g.nodes[node_type].data["label"][new_node_id] = g.nodes[node_type].data["label"][mapping[node1]] 
                 
             pre_node1 = mapping[node1].item()
             pre_node2 = mapping[node2].item()
@@ -338,7 +340,8 @@ class HeteroCoarsener(GraphSummarizer):
                 mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
                 mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
             g.remove_nodes([pre_node1, pre_node2], ntype=node_type) 
-            
+        
+         
                 
         print("_merge_nodes", time.time()- start_time)       
         return g, mapping     
@@ -596,6 +599,27 @@ class HeteroCoarsener(GraphSummarizer):
                 node_id = mapping[node_id].item()
             master_mapping[node.item()] = node_id
         return master_mapping
+    
+    def _get_labels(self, mapping, ntype):
+        
+        labels_dict = dict()
+        inverse_mapping = dict()
+        for ori_node, coar_node in mapping.items():
+            if coar_node in inverse_mapping:
+                inverse_mapping[coar_node].append(ori_node)
+            else:
+                inverse_mapping[coar_node] = [ori_node]
+        for coar_node, ori_list in inverse_mapping.items():
+            label_list = []
+            for ori_node in ori_list:
+                label_list.append(self.original_graph.nodes[ntype].data["label"][ori_node].item())
+            counter = Counter(label_list)
+            
+            labels_dict[coar_node],_ = counter.most_common()[0]
+        
+        return labels_dict
+                
+            
     
     
     def init_step(self):
