@@ -153,7 +153,7 @@ class HeteroCoarsener(GraphSummarizer):
             edge_weight_tensor = edge_weight_tensor[:edge_cnt]
             self.merge_graphs[ntype].add_edges(edge_tensor[0], edge_tensor[1])
             self.merge_graphs[ntype].edata["edge_weight"] = torch.tensor(edge_weight_tensor)
-            self.merge_graphs[ntype].edata["node_size"] = torch.ones(edge_weight_tensor.shape[0])
+            self.merge_graphs[ntype].ndata["node_size"] = torch.ones(num_nodes)
             
         print("_init_merge_graph", time.time() - start_time)
 
@@ -365,6 +365,9 @@ class HeteroCoarsener(GraphSummarizer):
             
             pre_node1 = mapping[node1].item()
             pre_node2 = mapping[node2].item()
+            size_node1 = g.ndata["node_size"][pre_node1]
+            size_node2 = g.ndata["node_size"][pre_node2]
+            g.ndata["node_size"][new_node_id] = size_node1 + size_node2
             mapping[node1] = new_node_id  
             mapping[node2] = new_node_id
                 
@@ -419,7 +422,7 @@ class HeteroCoarsener(GraphSummarizer):
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
                 continue
-            H_merged = self._create_h_via_cache_vec(candidates, etype)
+            H_merged = self._create_h_via_cache_vec(candidates, etype, self.merge_graphs[ntype].ndata["node_size"])
             
             
             
@@ -511,7 +514,7 @@ class HeteroCoarsener(GraphSummarizer):
         h = ((torch.sqrt(torch.tensor(d_u)) * s_u) + (torch.sqrt(torch.tensor(d_v)) * s_v)) / (torch.sqrt(torch.tensor(d_u_v)))
         return h
     
-    def _create_h_via_cache_vec(self,  table, etype):
+    def _create_h_via_cache_vec(self,  table, etype, cluster_sizes):
         cache = self.H_originals_stacked
        # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
         H_merged = dict()
@@ -519,9 +522,9 @@ class HeteroCoarsener(GraphSummarizer):
        # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
         for node1, merge_nodes in table.items(): # TODO: vectorize
             merge_nodes = torch.tensor(list(merge_nodes))
-            smth = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1) + 1)
-            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] + 1) + smth
-            h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + 2 + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
+            smth = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1)  + cluster_sizes[merge_nodes].unsqueeze(dim=1))
+            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] +cluster_sizes[node1]) + smth
+            h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
             H_merged[node1] = h
         
         return H_merged
@@ -554,7 +557,7 @@ class HeteroCoarsener(GraphSummarizer):
                 
             if not src_type in costs_dict:
                 costs_dict[src_type] = dict()
-            H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype)
+            H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
 
 
             
