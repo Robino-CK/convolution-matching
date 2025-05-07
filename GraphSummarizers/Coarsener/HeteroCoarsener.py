@@ -165,9 +165,7 @@ class HeteroCoarsener(GraphSummarizer):
             H = pca.fit_transform(
             (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
             )   
-            scaler = MinMaxScaler()
-            H = scaler.fit_transform(H)
-
+       
         kd_tree = scipy.spatial.KDTree(H)
         k = min (self.num_nearest_per_etype, H.shape[0])
         distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
@@ -187,9 +185,7 @@ class HeteroCoarsener(GraphSummarizer):
             H = pca.fit_transform(
             (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
             )   
-            scaler = MinMaxScaler()
-            H = scaler.fit_transform(H)
-
+      
         kd_tree = scipy.spatial.KDTree(H)
         k = min (self.num_nearest_per_etype, H.shape[0])
         distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
@@ -213,6 +209,8 @@ class HeteroCoarsener(GraphSummarizer):
                     closest_over_all_etypes[src_type][node.item()] = set(closest_over_all_etypes[src_type][node.item()]).union(nearest_neighbor)
         for ntype in self.coarsened_graph.ntypes:
             for node in self.coarsened_graph.nodes(ntype):
+                if not "feat" in self.coarsened_graph.nodes[dst_type].data:
+                    continue
                 if node.item() not in closest_over_all_etypes[ntype]:
                     closest_over_all_etypes[ntype][node.item()] = list(init_costs[ntype][1][node.item()])
                 else:
@@ -385,6 +383,8 @@ class HeteroCoarsener(GraphSummarizer):
 
 
     def _update_merge_graph_edge_weigths_features(self, g, ntype, candidates ):
+        if "feat" not in self.coarsened_graph.nodes[ntype].data:
+            return
         feat = self.coarsened_graph.nodes[ntype].data['feat']
         device = feat.device
 
@@ -532,6 +532,8 @@ class HeteroCoarsener(GraphSummarizer):
     
     def _feature_costs(self, costs_dict, merge_list):
         for ntype in self.coarsened_graph.ntypes:
+            if "feat" not in self.coarsened_graph.nodes[ntype].data:
+                continue
             feat = self.coarsened_graph.nodes[ntype].data["feat"]
            # dim_normalization = np.sqrt(feat.shape[1])
             costs_dict[ntype] = dict()
@@ -550,7 +552,7 @@ class HeteroCoarsener(GraphSummarizer):
                 costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
 
                 for (node1, node2), cost in zip(pairs, costs):
-                    costs_dict[ntype][(node1, node2)] = cost #n/ dim_normalization
+                    costs_dict[ntype][(node1, node2)] = cost #/ dim_normalization
     
     def _neighbor_h_costs(self, costs_dict, merge_list):
         
@@ -577,12 +579,16 @@ class HeteroCoarsener(GraphSummarizer):
                     if node1 == node2:
                         continue
                     key = (node1, node2)
-                    costs_dict[src_type][key] += cost #/ np.sqrt(node1_repr.shape[0])
+                    if key not in costs_dict[src_type].keys():
+                        costs_dict[src_type][key] = cost
+                    else:
+                        costs_dict[src_type][key] += cost #/ np.sqrt(node1_repr.shape[0])
                     
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
         
         costs_dict = dict()
+        
         self._feature_costs(costs_dict, merge_list)
         self._neighbor_h_costs(costs_dict, merge_list)    
         
@@ -679,11 +685,10 @@ class HeteroCoarsener(GraphSummarizer):
         
 
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
-
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
-coarsener.init_step()
-for i in range(600):
-    print("--------- step: " , i , "---------" )
-    coarsener.iteration_step()
+# aifb = AIFB()
+# original_graph = aifb.load_graph()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
+# coarsener.init_step()
+# for i in range(600):
+#     print("--------- step: " , i , "---------" )
+#     coarsener.iteration_step()
