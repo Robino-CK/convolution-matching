@@ -1,7 +1,6 @@
 import torch
 from dgl import heterograph
 import dgl
-import torch_geometric.transforms as T
 import torch_geometric
 from sklearn.decomposition import PCA
 
@@ -10,7 +9,6 @@ import dgl
 import os
 import sys
 import torch
-from torch.serialization import add_safe_globals
 from torch_geometric.data import HeteroData
 from torch_geometric.data.graph_store import EdgeAttr
 from torch_geometric.data.storage import NodeStorage

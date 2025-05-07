@@ -3,13 +3,9 @@ import dgl
 import numpy as np
 import os
 import sys
-from collections import defaultdict
 
 import time
 import torch
-import sklearn
-from abc import abstractmethod
-from tqdm import tqdm
 from sklearn.decomposition import PCA
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "../../"))
@@ -19,14 +15,10 @@ from GraphSummarizers.GraphSummarizer import SUMMARY_GRAPH_FILENAME
 from GraphSummarizers.GraphSummarizer import SUMMARY_STATISTICS_FILENAME
 from GraphSummarizers.GraphSummarizer import ORIGINAL_TO_SUPER_NODE_FILENAME
 from Datasets.NodeClassification.DBLP import DBLP
-from tqdm import tqdm
-from dgl.dataloading import MultiLayerFullNeighborSampler, DataLoader
 from Datasets.NodeClassification.AIFB import AIFB
 import pickle
-from Datasets.NodeClassification.TestHetero import TestHeteroSmall, TestHeteroBig
 import dgl
 import torch
-from scipy.sparse import coo_matrix
 import scipy
 from collections import Counter
 from copy import deepcopy
@@ -679,11 +671,11 @@ class HeteroCoarsener(GraphSummarizer):
         
 
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
+dataset = DBLP() 
+original_graph = dataset.load_graph()
 
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
-# coarsener.init_step()
-# for i in range(600):
-#     print("--------- step: " , i , "---------" )
-#     coarsener.iteration_step()
+coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
+coarsener.init_step()
+for i in range(600):
+    print("--------- step: " , i , "---------" )
+    coarsener.iteration_step()
