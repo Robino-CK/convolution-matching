@@ -28,13 +28,13 @@ class DBLP():
    #     self.epochs = 600
 
     def load_graph(self) -> dgl.DGLGraph:
-        torch.serialization.add_safe_globals([HeteroData])
-        torch.serialization.add_safe_globals([HeteroData])
-        torch.serialization.add_safe_globals([EdgeAttr])
-        torch.serialization.add_safe_globals([torch_geometric.data.TensorAttr])
-        torch.serialization.add_safe_globals([BaseStorage])
-        torch.serialization.add_safe_globals([NodeStorage])
-        torch.serialization.add_safe_globals([EdgeStorage])
+        # torch.serialization.add_safe_globals([HeteroData])
+        # torch.serialization.add_safe_globals([HeteroData])
+        # torch.serialization.add_safe_globals([EdgeAttr])
+        # torch.serialization.add_safe_globals([torch_geometric.data.TensorAttr])
+        # torch.serialization.add_safe_globals([BaseStorage])
+        # torch.serialization.add_safe_globals([NodeStorage])
+        # torch.serialization.add_safe_globals([EdgeStorage])
         
         # Load the dataset
         path = './dblp'

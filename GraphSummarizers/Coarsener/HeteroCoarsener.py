@@ -10,6 +10,8 @@ from sklearn.decomposition import PCA
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "../../"))
 from Datasets.Dataset import Dataset
+
+from sklearn.preprocessing import MinMaxScaler
 from GraphSummarizers.GraphSummarizer import GraphSummarizer
 from GraphSummarizers.GraphSummarizer import SUMMARY_GRAPH_FILENAME
 from GraphSummarizers.GraphSummarizer import SUMMARY_STATISTICS_FILENAME
@@ -163,6 +165,9 @@ class HeteroCoarsener(GraphSummarizer):
             H = pca.fit_transform(
             (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
             )   
+            scaler = MinMaxScaler()
+            H = scaler.fit_transform(H)
+
         kd_tree = scipy.spatial.KDTree(H)
         k = min (self.num_nearest_per_etype, H.shape[0])
         distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
@@ -182,6 +187,9 @@ class HeteroCoarsener(GraphSummarizer):
             H = pca.fit_transform(
             (H - H.mean(dim=0)) / (H.std(dim=0) + 0.0001)
             )   
+            scaler = MinMaxScaler()
+            H = scaler.fit_transform(H)
+
         kd_tree = scipy.spatial.KDTree(H)
         k = min (self.num_nearest_per_etype, H.shape[0])
         distances, nearest_neighbors =  kd_tree.query(H, k=k, p=1, eps=0.01, workers=1) # TODO
@@ -525,7 +533,7 @@ class HeteroCoarsener(GraphSummarizer):
     def _feature_costs(self, costs_dict, merge_list):
         for ntype in self.coarsened_graph.ntypes:
             feat = self.coarsened_graph.nodes[ntype].data["feat"]
-            dim_normalization = np.sqrt(feat.shape[1])
+           # dim_normalization = np.sqrt(feat.shape[1])
             costs_dict[ntype] = dict()
             # Prepare list of node pairs to compare
             pairs = [(node1, node2)
@@ -542,7 +550,7 @@ class HeteroCoarsener(GraphSummarizer):
                 costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
 
                 for (node1, node2), cost in zip(pairs, costs):
-                    costs_dict[ntype][(node1, node2)] = cost / dim_normalization
+                    costs_dict[ntype][(node1, node2)] = cost #n/ dim_normalization
     
     def _neighbor_h_costs(self, costs_dict, merge_list):
         
@@ -569,7 +577,7 @@ class HeteroCoarsener(GraphSummarizer):
                     if node1 == node2:
                         continue
                     key = (node1, node2)
-                    costs_dict[src_type][key] += cost / np.sqrt(node1_repr.shape[0])
+                    costs_dict[src_type][key] += cost #/ np.sqrt(node1_repr.shape[0])
                     
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
