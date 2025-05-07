@@ -533,6 +533,7 @@ class HeteroCoarsener(GraphSummarizer):
     def _feature_costs(self, costs_dict, merge_list):
         for ntype in self.coarsened_graph.ntypes:
             feat = self.coarsened_graph.nodes[ntype].data["feat"]
+            dim_normalization = np.sqrt(feat.shape[1])
             costs_dict[ntype] = dict()
             # Prepare list of node pairs to compare
             pairs = [(node1, node2)
@@ -549,7 +550,7 @@ class HeteroCoarsener(GraphSummarizer):
                 costs = torch.norm(new_feats - node1_feats, p=1, dim=1) + torch.norm(new_feats - node2_feats, p=1, dim=1)
 
                 for (node1, node2), cost in zip(pairs, costs):
-                    costs_dict[ntype][(node1, node2)] = cost
+                    costs_dict[ntype][(node1, node2)] = cost / dim_normalization
     
     def _neighbor_h_costs(self, costs_dict, merge_list):
         
@@ -576,7 +577,7 @@ class HeteroCoarsener(GraphSummarizer):
                     if node1 == node2:
                         continue
                     key = (node1, node2)
-                    costs_dict[src_type][key] += cost
+                    costs_dict[src_type][key] += cost / np.sqrt(node1_repr.shape[0])
                     
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
