@@ -404,7 +404,7 @@ class HeteroCoarsener(GraphSummarizer):
         f1 = feat[src]       # [E'×H]
         f2 = feat[dst]       # [E'×H]
         mid = (f1 - f2) / 2   # [E'×H]
-        costs = torch.abs(torch.nn.functional.cosine_similarity(mid , f1,  dim=1)) + torch.abs(torch.nn.functional.cosine_similarity(mid , f2,  dim=1))  # [E']
+        costs = (1 - torch.abs(torch.nn.functional.cosine_similarity(mid , f1,  dim=1))) + (1- torch.abs(torch.nn.functional.cosine_similarity(mid , f2,  dim=1)))  # [E']
 
         # 4) lookup edge IDs & assign all at once
         eids = g.edge_ids(src, dst)               # [E']
@@ -446,9 +446,9 @@ class HeteroCoarsener(GraphSummarizer):
             dst_repr = self.H_originals_stacked[etype][dst_nodes]   # [E×H]
 
             # 4) L1 distances and total cost:
-            cost_src = torch.nn.functional.cosine_similarity(src_repr , merged_repr,  dim=1)  # [E]
-            cost_dst = torch.nn.functional.cosine_similarity(dst_repr , merged_repr,  dim=1)  # [E]
-            total_cost = torch.abs(cost_src) + torch.abs(cost_dst)                          # [E]
+            cost_src = 1- torch.abs(torch.nn.functional.cosine_similarity(src_repr , merged_repr,  dim=1))  # [E]
+            cost_dst = 1 -torch.abs(torch.nn.functional.cosine_similarity(dst_repr , merged_repr,  dim=1))  # [E]
+            total_cost = cost_src + cost_dst                          # [E]
 
             # 5) Fetch all edge IDs and write back in one shot:
             edge_ids = g.edge_ids(src_nodes, dst_nodes)               # [E]
@@ -549,7 +549,7 @@ class HeteroCoarsener(GraphSummarizer):
                 node2_feats = feat[list(node2_ids)]
 
                 new_feats = (node1_feats - node2_feats) / 2
-                costs = torch.abs(torch.nn.functional.cosine_similarity(new_feats , node1_feats,  dim=1)) + torch.abs(torch.nn.functional.cosine_similarity(new_feats , node2_feats,  dim=1))
+                costs = (1- torch.abs(torch.nn.functional.cosine_similarity(new_feats , node1_feats,  dim=1))) + (1- torch.abs(torch.nn.functional.cosine_similarity(new_feats , node2_feats,  dim=1)))
 
                 for (node1, node2), cost in zip(pairs, costs):
                     costs_dict[ntype][(node1, node2)] = cost #/ dim_normalization
@@ -571,9 +571,9 @@ class HeteroCoarsener(GraphSummarizer):
                 merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
 
                 # Compute cost: L1 distance from node1 to merged and node2 to merged
-                cost_node1 = torch.nn.functional.cosine_similarity(node1_repr.unsqueeze(0) ,merged_repr,  dim=1)  # [num_candidates]
-                cost_node2 = torch.nn.functional.cosine_similarity(node2_repr , merged_repr, dim=1)               # [num_candidates]
-                total_cost = torch.abs(cost_node1) + torch.abs(cost_node2)                                        # [num_candidates]
+                cost_node1 =1 -  torch.abs(torch.nn.functional.cosine_similarity(node1_repr.unsqueeze(0) ,merged_repr,  dim=1))  # [num_candidates]
+                cost_node2 =1 - torch.abs( torch.nn.functional.cosine_similarity(node2_repr , merged_repr, dim=1) )              # [num_candidates]
+                total_cost = cost_node1 + cost_node2                                        # [num_candidates]
 
                 for node2, cost in zip(merge_candidates, total_cost):
                     if node1 == node2:
