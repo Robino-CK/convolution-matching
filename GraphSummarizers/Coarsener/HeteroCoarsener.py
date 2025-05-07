@@ -686,11 +686,11 @@ class HeteroCoarsener(GraphSummarizer):
 
 
 
-dataset = DBLP() 
-original_graph = dataset.load_graph()
+# dataset = DBLP() 
+# original_graph = dataset.load_graph()
 
-coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
-coarsener.init_step()
-for i in range(600):
-    print("--------- step: " , i , "---------" )
-    coarsener.iteration_step()
+# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
+# coarsener.init_step()
+# for i in range(600):
+#     print("--------- step: " , i , "---------" )
+#     coarsener.iteration_step()
