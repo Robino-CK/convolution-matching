@@ -1,10 +1,18 @@
-class AbstractHetero():
-    def __init__(self):
-        pass
 import torch
-from torch_geometric.data import HeteroData
 
-from torch_geometric.utils import from_dgl
+import torch
+from torch_geometric.data import Data
+
+def from_dgl(g):
+    # edges
+    u, v = g.edges()
+    edge_index = torch.stack([u, v], dim=0)
+    # node features (if any)
+    x = g.ndata.get('x', None)
+    # edge features (if any)
+    edge_attr = g.edata.get('edge_attr', None)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
 
 def dgl_to_pyg_input(g):
     # Convert DGL heterograph to PyG's HeteroData
