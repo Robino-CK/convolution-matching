@@ -391,7 +391,7 @@ class HeteroCoarsener(GraphSummarizer):
         f1 = feat[src]       # [E'×H]
         f2 = feat[dst]       # [E'×H]
         mid = (f1 - f2) / 2   # [E'×H]
-        costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][1] -self.minmax_ntype[ntype][0])  # [E']
+        costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
 
         # 4) lookup edge IDs & assign all at once
         eids = g.edge_ids(src, dst)               # [E']
@@ -435,7 +435,7 @@ class HeteroCoarsener(GraphSummarizer):
             # 4) L1 distances and total cost:
             cost_src =torch.norm(src_repr - merged_repr,  dim=1, p=1)  # [E]
             cost_dst = torch.norm(dst_repr - merged_repr,  dim=1, p=1)  # [E]
-            total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][1] -self.minmax_etype[etype][0])               # [E]
+            total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
 
             # 5) Fetch all edge IDs and write back in one shot:
             edge_ids = g.edge_ids(src_nodes, dst_nodes)               # [E]
@@ -560,8 +560,8 @@ class HeteroCoarsener(GraphSummarizer):
                 costs_dict[src_type][etype] = dict()
             # TODO: wie bei features  costs machen
             H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
-            costs_array = torch.zeros(len(merge_list[src_type]) * self.num_nearest_per_etype *  len(self.coarsened_graph.canonical_etypes) )
-            index_array = torch.zeros(2,len(merge_list[src_type])  *  self.num_nearest_per_etype *(len(self.coarsened_graph.canonical_etypes) ), dtype=torch.int64)
+            costs_array = torch.zeros(len(merge_list[src_type]) * self.num_nearest_per_etype *  len(self.coarsened_graph.canonical_etypes) * 10 )
+            index_array = torch.zeros(2,len(merge_list[src_type])  *  self.num_nearest_per_etype *(len(self.coarsened_graph.canonical_etypes)  * 10), dtype=torch.int64)
 
             index = 0
             for node1, merge_candidates in merge_list[src_type].items(): # TODO: vectorize
@@ -598,7 +598,7 @@ class HeteroCoarsener(GraphSummarizer):
             minimum = torch.min(costs_array)
             maximum = torch.max(costs_array)
             R = (maximum - minimum + 0.0000000000000001)
-            self.minmax_ntype[ntype] = (minimum, maximum,)
+            self.minmax_ntype[ntype] = (minimum, maximum,R)
             costs_array = (costs_array / R)
             costs_dict[ntype] = costs_array
             index_dict[ntype] = index_array
@@ -628,7 +628,9 @@ class HeteroCoarsener(GraphSummarizer):
         
         
         costs_dict_features = self._feature_costs( merge_list)
+        print("feat ")
         costs_dict_etype = self._neighbor_h_costs( merge_list)    
+        print("neighbor")
         costs_dict, index_dict = self._add_costs(costs_dict_features, costs_dict_etype)
         print("_costs_of_merges", time.time() - start_time)
         return costs_dict , index_dict
