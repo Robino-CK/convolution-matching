@@ -59,6 +59,8 @@ class HeteroCoarsener(GraphSummarizer):
         self.H_originals = dict()
         self.label_list_supernodes = dict()
         self.init_node_info()
+        self.minmax_ntype = dict()
+        self.minmax_etype = dict()
         
     
     def init_node_info(self):
@@ -404,7 +406,7 @@ class HeteroCoarsener(GraphSummarizer):
         f1 = feat[src]       # [E'×H]
         f2 = feat[dst]       # [E'×H]
         mid = (f1 - f2) / 2   # [E'×H]
-        costs = (1 - torch.abs(torch.nn.functional.cosine_similarity(mid , f1,  dim=1))) + (1- torch.abs(torch.nn.functional.cosine_similarity(mid , f2,  dim=1)))  # [E']
+        costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][1] -self.minmax_ntype[ntype][0])  # [E']
 
         # 4) lookup edge IDs & assign all at once
         eids = g.edge_ids(src, dst)               # [E']
@@ -446,9 +448,9 @@ class HeteroCoarsener(GraphSummarizer):
             dst_repr = self.H_originals_stacked[etype][dst_nodes]   # [E×H]
 
             # 4) L1 distances and total cost:
-            cost_src = 1- torch.abs(torch.nn.functional.cosine_similarity(src_repr , merged_repr,  dim=1))  # [E]
-            cost_dst = 1 -torch.abs(torch.nn.functional.cosine_similarity(dst_repr , merged_repr,  dim=1))  # [E]
-            total_cost = cost_src + cost_dst                          # [E]
+            cost_src =torch.norm(src_repr - merged_repr,  dim=1, p=1)  # [E]
+            cost_dst = torch.norm(dst_repr - merged_repr,  dim=1, p=1)  # [E]
+            total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][1] -self.minmax_etype[etype][0])               # [E]
 
             # 5) Fetch all edge IDs and write back in one shot:
             edge_ids = g.edge_ids(src_nodes, dst_nodes)               # [E]
@@ -530,12 +532,13 @@ class HeteroCoarsener(GraphSummarizer):
         return H_merged
     
     
-    def _feature_costs(self, costs_dict, merge_list):
+    def _feature_costs(self,  merge_list):
+        costs_dict = dict()
         for ntype in self.coarsened_graph.ntypes:
             if "feat" not in self.coarsened_graph.nodes[ntype].data:
                 continue
             feat = self.coarsened_graph.nodes[ntype].data["feat"]
-           # dim_normalization = np.sqrt(feat.shape[1])
+            dim_normalization = np.sqrt(feat.shape[1])
             costs_dict[ntype] = dict()
             # Prepare list of node pairs to compare
             pairs = [(node1, node2)
@@ -549,17 +552,20 @@ class HeteroCoarsener(GraphSummarizer):
                 node2_feats = feat[list(node2_ids)]
 
                 new_feats = (node1_feats - node2_feats) / 2
-                costs = (1- torch.abs(torch.nn.functional.cosine_similarity(new_feats , node1_feats,  dim=1))) + (1- torch.abs(torch.nn.functional.cosine_similarity(new_feats , node2_feats,  dim=1)))
+                costs = torch.norm(new_feats - node1_feats,  dim=1,p=1) + torch.norm(new_feats - node2_feats,  dim=1, p=1)
 
                 for (node1, node2), cost in zip(pairs, costs):
-                    costs_dict[ntype][(node1, node2)] = cost #/ dim_normalization
+                    costs_dict[ntype][(node1, node2)] = cost 
+        return costs_dict
     
-    def _neighbor_h_costs(self, costs_dict, merge_list):
-        
+    def _neighbor_h_costs(self,  merge_list):
+        costs_dict = dict()
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
                 
             if not src_type in costs_dict:
                 costs_dict[src_type] = dict()
+            if not etype in costs_dict[src_type]:
+                costs_dict[src_type][etype] = dict()
             H_merged = self._create_h_via_cache_vec(merge_list[src_type], etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
 
 
@@ -571,27 +577,48 @@ class HeteroCoarsener(GraphSummarizer):
                 merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
 
                 # Compute cost: L1 distance from node1 to merged and node2 to merged
-                cost_node1 =1 -  torch.abs(torch.nn.functional.cosine_similarity(node1_repr.unsqueeze(0) ,merged_repr,  dim=1))  # [num_candidates]
-                cost_node2 =1 - torch.abs( torch.nn.functional.cosine_similarity(node2_repr , merged_repr, dim=1) )              # [num_candidates]
+                cost_node1 =torch.norm(node1_repr.unsqueeze(0)  - merged_repr,  dim=1, p=1)  # [num_candidates]
+                cost_node2 = torch.norm(node2_repr - merged_repr, dim=1, p=1)              # [num_candidates]
                 total_cost = cost_node1 + cost_node2                                        # [num_candidates]
 
                 for node2, cost in zip(merge_candidates, total_cost):
                     if node1 == node2:
                         continue
                     key = (node1, node2)
-                    if key not in costs_dict[src_type].keys():
-                        costs_dict[src_type][key] = cost
-                    else:
-                        costs_dict[src_type][key] += cost #/ np.sqrt(node1_repr.shape[0])
+                    costs_dict[src_type][etype][key] = cost
+        return costs_dict 
+
+    def _add_costs(self, costs_dict_feat, costs_dict_etype):
+        start_time = time.time()
+        print("start add_costs")
+        costs_dict = dict()
+        
+        for ntype in costs_dict_feat:
+            costs_dict[ntype] = dict()
+            minimum = min(costs_dict_feat[ntype].values())
+            maximum = max(costs_dict_feat[ntype].values())
+            self.minmax_ntype[ntype] = (minimum, maximum)
+            for node_pair, costs in costs_dict_feat[ntype].items():
+                costs_dict[ntype][node_pair] = costs / (maximum - minimum + 0.0001)
+        for src_type,ecosts in costs_dict_etype.items():
+            for etype, node_pair_costs in ecosts.items():
+                minimum = min(node_pair_costs.values())
+                maximum = max(node_pair_costs.values())
+                self.minmax_etype[etype] = (minimum, maximum)
+                for node_pair, costs in node_pair_costs.items():
+                    if not node_pair in costs_dict[src_type]:
+                        costs_dict[src_type][node_pair] = 0
+                    costs_dict[src_type][node_pair] += costs / (maximum - minimum + 0.0001)
+        print("_add_costs", time.time() - start_time)
+        return costs_dict
                     
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
         
-        costs_dict = dict()
         
-        self._feature_costs(costs_dict, merge_list)
-        self._neighbor_h_costs(costs_dict, merge_list)    
-        
+        costs_dict_features = self._feature_costs( merge_list)
+        costs_dict_etype = self._neighbor_h_costs( merge_list)    
+        costs_dict = self._add_costs(costs_dict_features, costs_dict_etype)
         print("_costs_of_merges", time.time() - start_time)
         return costs_dict 
             
@@ -685,12 +712,12 @@ class HeteroCoarsener(GraphSummarizer):
         
 
 
+if __name__ == "__main__":
+    dataset = DBLP() 
+    original_graph = dataset.load_graph()
 
-# dataset = DBLP() 
-# original_graph = dataset.load_graph()
-
-# coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
-# coarsener.init_step()
-# for i in range(600):
-#     print("--------- step: " , i , "---------" )
-#     coarsener.iteration_step()
+    coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
+    coarsener.init_step()
+    for i in range(600):
+        print("--------- step: " , i , "---------" )
+        coarsener.iteration_step()
