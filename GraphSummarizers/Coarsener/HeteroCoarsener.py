@@ -59,6 +59,7 @@ class HeteroCoarsener(GraphSummarizer):
         self.H_originals = dict()
         self.label_list_supernodes = dict()
         self.init_node_info()
+        self.S_cache = dict()
         self.minmax_ntype = dict()
         self.minmax_etype = dict()
         
@@ -85,7 +86,7 @@ class HeteroCoarsener(GraphSummarizer):
     def _create_h_spatial_rgcn(self, g):
         start_time = time.time()
         H = dict()
-        
+        S = dict()
         device = "cpu"
         
         for src_type, etype, dst_type in g.canonical_etypes:
@@ -103,23 +104,30 @@ class HeteroCoarsener(GraphSummarizer):
                 features = g.nodes[dst_type].data["feat"].to(device)
             #degree_inv_dest = degree_inv_dest.to(device)
             H[etype] = dict()
+            S[etype] = dict()
             all_nodes = g.nodes(src_type)
             #H[etype] = 
             for node in all_nodes:
                 neighbors = g.successors(node, etype=(src_type, etype, dst_type))
                 if is_features:
                     H[etype][node.item()] = torch.zeros(features.shape[1], device=device)
+                    S[etype][node.item()] = torch.zeros(features.shape[1], device=device)
                 else:
                     H[etype][node.item()] = torch.zeros(1, device=device)
+                    S[etype][node.item()] = torch.zeros(1, device=device)
                 for neigh in neighbors:
                     if is_features:
                         feat = features[neigh]
                     else:
                         feat = torch.tensor(1.0, device=device)
                     #feat = feat.to(device)
-                    H[etype][node.item()] += degree_inv_src[node] * degree_inv_dest[neigh] * feat
+                    s = degree_inv_dest[neigh] * feat
+                    S[etype][node.item()] += s
+                    H[etype][node.item()] += degree_inv_src[node] * s
+            self.S_cache[etype] = torch.stack(list(S[etype].values()))
             self.H_originals_stacked[etype] = torch.stack(list(H[etype].values()))
         self.H_originals = H
+        
         print("_create_h_spatial_rgcn", time.time() - start_time )  
     
     
@@ -409,7 +417,7 @@ class HeteroCoarsener(GraphSummarizer):
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
                 continue
-            H_merged = self._create_h_via_cache_vec(candidates, etype, self.merge_graphs[ntype].ndata["node_size"])
+            H_merged = self._create_h_via_cache_vec(candidates, etype,  self.merge_graphs[ntype].ndata["node_size"])
             
             
             
@@ -502,16 +510,32 @@ class HeteroCoarsener(GraphSummarizer):
         return h
     
     def _create_h_via_cache_vec(self,  table, etype, cluster_sizes):
-        cache = self.H_originals_stacked
+        cache = self.S_cache
        # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
         H_merged = dict()
         
        # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
         for node1, merge_nodes in table.items(): # TODO: vectorize
             merge_nodes = torch.tensor(list(merge_nodes))
-            smth = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1)  + cluster_sizes[merge_nodes].unsqueeze(dim=1))
-            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] +cluster_sizes[node1]) + smth
-            h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
+            merge_s = cache[etype][merge_nodes] * torch.sqrt(self.node_degrees[etype]["out"][merge_nodes].unsqueeze(dim=1)  + cluster_sizes[merge_nodes].unsqueeze(dim=1))
+            h = cache[etype][node1] * torch.sqrt(self.node_degrees[etype]["out"][node1] +cluster_sizes[node1]) + merge_s
+            #node1_neighbors = self.coarsened_graph.successors(node1, etype=etype)
+            nbrs_u = self.coarsened_graph.successors(node1, etype=etype)    # tensor of neighbors of u
+             
+            duv = torch.zeros((len(merge_nodes), 1))
+            
+            for i, node2 in enumerate(merge_nodes):
+              #  nbrs_v = self.coarsened_graph.successors(node2, etype=etype)    # tensor of neighbors of v
+
+                # form union of the two tensors, then remove u and v themselves if present
+  #              all_nbrs = torch.unique(torch.cat([nbrs_u, nbrs_v]))
+ #               all_nbrs = all_nbrs[(all_nbrs != node1) & (all_nbrs != node2)]
+
+#                duv[i][0] = all_nbrs.numel()
+                duv[i][0] = len(set(set(nbrs_u).union(self.coarsened_graph.successors(node2, etype=etype))))
+            
+           # h = h / torch.sqrt(self.node_degrees[etype]["out"][node1] + self.node_degrees[etype]["out"][(merge_nodes)]).unsqueeze(dim=1)
+            h = h / torch.sqrt(duv)
             H_merged[node1] = h
         
         return H_merged
@@ -550,7 +574,7 @@ class HeteroCoarsener(GraphSummarizer):
                 costs_dict[ntype]["index"] = index_array
         return costs_dict
     
-    def _neighbor_h_costs(self,  merge_list):
+    def _h_costs(self,  merge_list):
         costs_dict = dict()
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
                 
@@ -586,6 +610,9 @@ class HeteroCoarsener(GraphSummarizer):
             costs_dict[src_type][etype]["index"] = index_array[:, :index]
         return costs_dict 
 
+    def _neighbors_h_costs(self, merge_list):
+        pass
+    
     def _add_costs(self, costs_dict_feat, costs_dict_etype):
         start_time = time.time()
         costs_dict = dict()
@@ -628,9 +655,7 @@ class HeteroCoarsener(GraphSummarizer):
         
         
         costs_dict_features = self._feature_costs( merge_list)
-        print("feat ")
-        costs_dict_etype = self._neighbor_h_costs( merge_list)    
-        print("neighbor")
+        costs_dict_etype = self._h_costs( merge_list)    
         costs_dict, index_dict = self._add_costs(costs_dict_features, costs_dict_etype)
         print("_costs_of_merges", time.time() - start_time)
         return costs_dict , index_dict
