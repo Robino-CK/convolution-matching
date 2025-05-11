@@ -3,7 +3,7 @@ import dgl
 import numpy as np
 import os
 import sys
-
+import math
 import time
 import torch
 from sklearn.decomposition import PCA
@@ -209,10 +209,14 @@ class HeteroCoarsener(GraphSummarizer):
             for node in self.coarsened_graph.nodes(ntype):
                 if not "feat" in self.coarsened_graph.nodes[dst_type].data:
                     continue
+                nearest_neighbor = list(init_costs[ntype][1][node.item()])
+                if node.item() in nearest_neighbor:
+                    nearest_neighbor.remove(node.item())
                 if node.item() not in closest_over_all_etypes[ntype]:
-                    closest_over_all_etypes[ntype][node.item()] = list(init_costs[ntype][1][node.item()])
+                    closest_over_all_etypes[ntype][node.item()] = nearest_neighbor
                 else:
-                    closest_over_all_etypes[ntype][node.item()] = set(closest_over_all_etypes[ntype][node.item()]).union(list(init_costs[ntype][1][node.item()]))
+                    closest_over_all_etypes[ntype][node.item()] = set(closest_over_all_etypes[ntype][node.item()]).union(nearest_neighbor)
+        
         print("_get_union", time.time() - start_time)
         return closest_over_all_etypes
 
@@ -513,9 +517,13 @@ class HeteroCoarsener(GraphSummarizer):
             merge_s = (cache[merge_nodes] * torch.sqrt(degree2  + cluster_sizes[merge_nodes].squeeze()).unsqueeze(1) )
             h = cache[node1] * torch.sqrt(degree1 +cluster_sizes[node1]) + merge_s
             
+            su = cache[node1]
+            sv = cache[merge_nodes]
+            su = su.repeat(merge_nodes.shape[0], 1)
             duv = degree1 + degree2 # TODO depended on if nodes are connected
             cuv = cluster_sizes[node1] + cluster_sizes[merge_nodes]
-            h = h / torch.sqrt(duv + cuv.squeeze()).unsqueeze(1)
+            
+            h = (su + sv) / torch.sqrt(duv + cuv.squeeze()).unsqueeze(1)
             H_merged[node1] = h
         
         return H_merged
@@ -527,7 +535,7 @@ class HeteroCoarsener(GraphSummarizer):
             if "feat" not in self.coarsened_graph.nodes[ntype].data:
                 continue
             feat = self.coarsened_graph.nodes[ntype].data["feat"]
-            dim_normalization = np.sqrt(feat.shape[1])
+            #dim_normalization = np.sqrt(feat.shape[1])
             costs_dict[ntype] = dict()
             # Prepare list of node pairs to compare
             pairs = [(node1, node2)
@@ -562,14 +570,17 @@ class HeteroCoarsener(GraphSummarizer):
                 costs_dict[src_type] = dict()
             if not etype in costs_dict[src_type]:
                 costs_dict[src_type][etype] = dict()
-            # TODO: wie bei features  costs machen
+            
+            
+            
             H_merged = self._create_h_via_cache_vec(merge_list[src_type], src_type, etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
             costs_array = torch.zeros(len(merge_list[src_type]) * self.num_nearest_per_etype *  len(self.coarsened_graph.canonical_etypes) * 10 )
             index_array = torch.zeros(2,len(merge_list[src_type])  *  self.num_nearest_per_etype *(len(self.coarsened_graph.canonical_etypes)  * 10), dtype=torch.int64)
 
+                
             index = 0
             for node1, merge_candidates in merge_list[src_type].items(): # TODO: vectorize
-                node1_repr = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][node1]                # shape: [hidden_dim]
+                node1_repr =   self.coarsened_graph.nodes[src_type].data[f'h{etype}'][node1]              # shape: [hidden_dim]
                 node2_indices = torch.tensor(list(merge_candidates), device=node1_repr.device)
                 node2_repr = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][node2_indices]       # shape: [num_candidates, hidden_dim]
                 merged_repr = H_merged[node1]                                     # shape: [num_candidates, hidden_dim]
@@ -635,11 +646,11 @@ class HeteroCoarsener(GraphSummarizer):
         start_time = time.time()
         
         
-        costs_dict_features = self._feature_costs( merge_list)
-        costs_dict_etype = self._h_costs( merge_list)    
-        costs_dict, index_dict = self._add_costs(costs_dict_features, costs_dict_etype)
+        self.init_costs_dict_features = self._feature_costs( merge_list)
+        self.init_costs_dict_etype = self._h_costs( merge_list)    
+        self.init_costs_dict, self.init_index_dict = self._add_costs(self.init_costs_dict_features, self.init_costs_dict_etype)
         print("_costs_of_merges", time.time() - start_time)
-        return costs_dict , index_dict
+        return self.init_costs_dict , self.init_index_dict
             
             
             
@@ -674,8 +685,8 @@ class HeteroCoarsener(GraphSummarizer):
             labels_dict[coar_node],_ = counter.most_common()[0]
         
         return labels_dict
-                
-            
+           
+     
     
     
     def init_step(self):
@@ -690,9 +701,9 @@ class HeteroCoarsener(GraphSummarizer):
         
         self._create_h_spatial_rgcn(self.original_graph)
         init_costs = self._init_costs_rgcn()
-        union = self._get_union(init_costs)
+        self.init_neighbors = self._get_union(init_costs)
         
-        merge_costs, edges = self._costs_of_merges(union)
+        merge_costs, edges = self._costs_of_merges(self.init_neighbors)
         self._init_merge_graph(merge_costs, edges)
         self.candidates = self._find_lowest_cost_edges()
    
@@ -732,46 +743,106 @@ class HeteroCoarsener(GraphSummarizer):
 
 
 class Tester(): 
+    def __init__(self):
+        self.s = dict()
+        self.s[0] = (2 / np.sqrt(2))
+        self.s[1] = (1 / np.sqrt(2)) * (3 + 5) + (1 / np.sqrt(3)) * (4)
+        self.s[2] = (1 / np.sqrt(3)) * (4) 
+        self.s[3] = 0
+        self.s[4] = 0
+        
+        self.h = dict()
+        self.h[0] = 1.0
+        self.h[1] = (1 / np.sqrt(4)) * self.s[1]
+        self.h[2] = (1 / np.sqrt(2)) * self.s[2]
+        self.h[3] = 0
+        self.h[4] = 0
     
-
+        self.nearest_neighbors = {0: {1,2}, 1:{0,2}, 2:{0,1}, 3:{2,4}, 4:{3}}
     def create_test_graph(self):
         g = dgl.heterograph({
             ('user', 'follows', 'user'): ([0, 1, 1, 1, 2], [1, 2, 3, 4,3])})
         g.nodes['user'].data['feat'] = torch.tensor([[1],[2],[3],[4],[5]])
+        
+
         return g
 
+
+
     def check_H(self):
-        to_check = dict()
-        to_check["s0"] = self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][0] == (2 / np.sqrt(2)) 
-        import math
-        to_check["h0"] = math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][0].item(), 1.0, rel_tol=1e-6)
-        
-        s1 = (1 / np.sqrt(2)) * (3 + 5) + (1 / np.sqrt(3)) * (4)
-        to_check["s1"] = self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][1] == s1 
-        to_check["h1"] = self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][1] == s1  * (1 / np.sqrt(4))
-        
-        to_check["s2"] =  math.isclose( self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][2].item(), (4 / np.sqrt(3)) , rel_tol=1e-6)
-        to_check["h2"] =  math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][2].item(), (4 / np.sqrt(3)) * (1 / np.sqrt(2)) ,rel_tol=1e-6)
-        
-        s3 = (2 / np.sqrt(2))  + (3 / np.sqrt(2)) 
-        to_check["s3"] =  math.isclose( self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][3].item(), 0 , rel_tol=1e-6)
-        to_check["h3"] =  math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][3].item(), 0, rel_tol=1e-6)
-        
-        to_check["s4"] =  math.isclose( self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][4].item(), 0, rel_tol=1e-6)
-        to_check["h4"] =  math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][4].item(), 0, rel_tol=1e-6)
-        
-        
-        for key, value in to_check.items():
+        for k, v in self.s.items():
+            assert math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'sfollows'][k].item(), v, rel_tol=1e-6), f"error in creating H for {k}"
             
-            assert value, f"error in creating H for {key}"
+        for k, v in self.h.items():
+            assert math.isclose(self.coarsener.coarsened_graph.nodes["user"].data[f'hfollows'][k].item(), v, rel_tol=1e-6), f"error in creating H for {k}"
+        
+    def check_init_H_costs(self):
+        neighbors = self.coarsener.init_neighbors["user"]
+        correct = self.nearest_neighbors
+        assert neighbors == correct, f"error in init neighbors {neighbors} != {correct}"
+    
+    def check_init_feat_costs(self):
+        
+        costs = self.coarsener.init_costs_dict_features["user"]["costs"]
+        index = self.coarsener.init_costs_dict_features["user"]["index"]
+        self.correct_feat_costs = {(0,1): 1, (1,0): 1 ,(2,0):2,   (0,2): 2, (1,2): 1, (2,1):1, (3,2): 1, (4,3) : 1, (3,4): 1}
+        for i in range(costs.shape[0]):
+            node1 = index[0][i].item()
+            node2 = index[1][i].item()
+            cost = costs[i].item()
+            if (node1, node2) in self.correct_feat_costs:
+                assert math.isclose(cost, self.correct_feat_costs[(node1, node2)], rel_tol=1e-6), f"error in init feat costs {cost} != {self.correct_feat_costs[(node1, node2)]}"
+            else:
+                assert math.isclose(cost, 0.0, rel_tol=1e-6), f"error in init feat costs {cost} != 0"
+            assert len(self.correct_feat_costs) == costs.shape[0], f"error in init feat costs {costs.shape[0]} != {len(self.correct_feat_costs)}"
+            
+    def check_init_H_costs(self):
+        
+        self.correct_H_costs = { }
+        for k, list_values in self.nearest_neighbors.items():
+            for v in list_values:
+                
+                huv = (self.s[k] + self.s[v]) / np.sqrt(self.g.out_degrees(k) + self.g.out_degrees(v) + 2)
+                self.correct_H_costs[k,v] =  torch.norm(torch.tensor(huv - self.h[k]),  p=1).item() + torch.norm(torch.tensor(huv -self.h[v]),  p=1).item()
+        costs = self.coarsener.init_costs_dict_etype["user"]["follows"]["costs"]
+        index = self.coarsener.init_costs_dict_etype["user"]["follows"]["index"]
+        for i in range(costs.shape[0]):
+            node1 = index[0][i].item()
+            node2 = index[1][i].item()
+            cost = costs[i].item()
+            if (node1, node2) in self.correct_H_costs:
+                assert math.isclose(cost, self.correct_H_costs[(node1, node2)], rel_tol=1e-2), f"error in init feat costs {cost} != {self.correct_H_costs[(node1, node2)]}"
+            else:
+                assert math.isclose(cost, 0.0, rel_tol=1e-6), f"error in init feat costs {cost} != 0"
+        assert len(self.correct_H_costs) == costs.shape[0], f"error in init feat costs {costs.shape[0]} != {len(self.correct_H_costs)}"
 
+    def check_init_total_costs(self):
+        costs = self.coarsener.init_costs_dict["user"]
+        index = self.coarsener.init_index_dict["user"]
+        correct_costs = dict()
+        for k, list_values in self.nearest_neighbors.items():
+            for v in list_values:
+                correct_costs[k,v] = (self.correct_H_costs[k,v] / 2.9831)  + (self.correct_feat_costs[k,v] / 1)
+                
+        for i in range(costs.shape[0]):
+            node1 = index[0][i].item()
+            node2 = index[1][i].item()
+            cost = costs[i].item()
+            if (node1, node2) in self.correct_H_costs:
+                assert math.isclose(cost, correct_costs[(node1, node2)], rel_tol=1e-2), f"error in init feat costs {cost} != {correct_costs[(node1, node2)]}"
+            else:
+                assert math.isclose(cost, 0.0, rel_tol=1e-6), f"error in init feat costs {cost} != 0"
+        assert len(self.correct_H_costs) == costs.shape[0], f"error in init feat costs {costs.shape[0]} != {len(self.correct_H_costs)}"
 
+        
     def run_test(self):
-        g = self.create_test_graph()
-        self.coarsener = HeteroCoarsener(None, g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30)
+        self.g = self.create_test_graph()
+        self.coarsener = HeteroCoarsener(None, self.g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30)
         self.coarsener.init_step()
         self.check_H()
-        
+        self.check_init_H_costs()
+        self.check_init_feat_costs()
+        self.check_init_total_costs()
         
     
     
