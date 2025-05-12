@@ -313,12 +313,22 @@ class HeteroCoarsener(GraphSummarizer):
                 if src_type != node_type:
                     continue
                 edges_original = g.edges(etype=etype)
-                mask_node1 =  torch.where(edges_original[0] == mapping[node1], True, False)
-                mask_node2 =  torch.where(edges_original[0] == mapping[node2], True, False)
+                mask_node1 =  edges_original[0] == (mapping[node1]).item()
+                mask_node2 =  edges_original[0] == mapping[node2].item()
                 mask = torch.logical_or(mask_node1, mask_node2)
                 edges_dst = torch.unique(edges_original[1][mask])
                 edges_src = torch.full(edges_dst.shape,new_node_id )
                 g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                
+                mask_node1 =  edges_original[1] == (mapping[node1]).item()
+                mask_node2 =  edges_original[1] == mapping[node2].item()
+                mask = torch.logical_or(mask_node1, mask_node2)
+                edges_dst = torch.unique(edges_original[0][mask])
+                edges_src = torch.full(edges_dst.shape,new_node_id )
+                g.add_edges(edges_dst, edges_src, etype=(src_type, etype,dst_type))
+                
+                
+                
                 suv = g.nodes[node_type].data[f's{etype}'][mapping[node1]] + g.nodes[node_type].data[f's{etype}'][mapping[node2]]
                 cuv = g.nodes[node_type].data["node_size"][mapping[node1]] + g.nodes[node_type].data["node_size"][mapping[node2]]
                 g.nodes[node_type].data["node_size"][new_node_id] = cuv
@@ -354,6 +364,8 @@ class HeteroCoarsener(GraphSummarizer):
     def _update_merge_graph_nodes_edges(self, g, node_pairs):
         mapping = torch.arange(0, g.num_nodes() )
         nodes_need_edge_weight_recalc = set()
+        
+        #g.nodes().data = torch.tensor() # HIER
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
             g.add_nodes(1)
             new_node_id =  g.num_nodes() -1
@@ -365,6 +377,14 @@ class HeteroCoarsener(GraphSummarizer):
             edges_dst = torch.unique(edges_original[1][mask])
             edges_src = torch.full(edges_dst.shape,new_node_id )
             g.add_edges(edges_src, edges_dst)
+            
+            ## TODO: destroys everything if uncommented lol
+            # mask_node1 =  torch.where(edges_original[1] == mapping[node1], True, False)
+            # mask_node2 =  torch.where(edges_original[1] == mapping[node2], True, False)
+            # mask = torch.logical_or(mask_node1, mask_node2)
+            # edges_dst = torch.unique(edges_original[0][mask])
+            # edges_src = torch.full(edges_dst.shape,new_node_id )
+            # g.add_edges(edges_dst , edges_src)
             
             
             pre_node1 = mapping[node1].item()
@@ -378,7 +398,7 @@ class HeteroCoarsener(GraphSummarizer):
             else:
                 mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
                 mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
-            nodes_need_edge_weight_recalc.add(node1)
+            nodes_need_edge_weight_recalc.add(new_node_id)
             nodes_need_edge_weight_recalc.add(node2)
             
             g.remove_nodes([pre_node1, pre_node2]) 
@@ -762,7 +782,7 @@ class Tester():
     def create_test_graph(self):
         g = dgl.heterograph({
             ('user', 'follows', 'user'): ([0, 1, 1, 1, 2], [1, 2, 3, 4,3])})
-        g.nodes['user'].data['feat'] = torch.tensor([[1],[2],[3],[4],[5]])
+        g.nodes['user'].data['feat'] = torch.tensor([[1.0],[2.0],[3.0],[4.0],[5.0]])
         
 
         return g
@@ -834,6 +854,15 @@ class Tester():
                 assert math.isclose(cost, 0.0, rel_tol=1e-6), f"error in init feat costs {cost} != 0"
         assert len(self.correct_H_costs) == costs.shape[0], f"error in init feat costs {costs.shape[0]} != {len(self.correct_H_costs)}"
 
+    def check_first_merge_candidates(self):
+        candidates = [(4,3), (1,2)]
+        assert self.coarsener.candidates["user"] == candidates, "error first merge candidates"
+        
+    def check_first_merge_nodes(self):
+        assert all(self.coarsener.coarsened_graph.edges()[0] ==  torch.tensor([0,2])), "error merged edges not correct"
+        assert all(self.coarsener.coarsened_graph.edges()[1] ==  torch.tensor([2,1]) ), "error merged edges not correct"
+        
+        assert all(self.coarsener.coarsened_graph.nodes["user"].data["feat"] == torch.tensor([[1.0], [4.5], [2.5]])), "error merge features not correct"
         
     def run_test(self):
         self.g = self.create_test_graph()
@@ -843,6 +872,10 @@ class Tester():
         self.check_init_H_costs()
         self.check_init_feat_costs()
         self.check_init_total_costs()
+        self.check_first_merge_candidates()
+        self.coarsener.iteration_step()
+        self.check_first_merge_nodes()
+        
         
     
     
