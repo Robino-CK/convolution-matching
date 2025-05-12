@@ -310,32 +310,35 @@ class HeteroCoarsener(GraphSummarizer):
             new_node_id =  g.num_nodes(ntype=node_type) -1
             
             for src_type, etype,dst_type in g.canonical_etypes:
-                if src_type != node_type:
+                if src_type != node_type and dst_type != node_type:
                     continue
                 edges_original = g.edges(etype=etype)
-                mask_node1 =  edges_original[0] == (mapping[node1]).item()
-                mask_node2 =  edges_original[0] == mapping[node2].item()
-                mask = torch.logical_or(mask_node1, mask_node2)
-                edges_dst = torch.unique(edges_original[1][mask])
-                edges_src = torch.full(edges_dst.shape,new_node_id )
-                g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                    
+                if src_type == node_type:
+                    
+                    mask_node1 =  edges_original[0] == (mapping[node1]).item()
+                    mask_node2 =  edges_original[0] == mapping[node2].item()
+                    mask = torch.logical_or(mask_node1, mask_node2)
+                    edges_dst = torch.unique(edges_original[1][mask])
+                    edges_src = torch.full(edges_dst.shape,new_node_id )
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                    suv = g.nodes[node_type].data[f's{etype}'][mapping[node1]] + g.nodes[node_type].data[f's{etype}'][mapping[node2]]
+                    cuv = g.nodes[node_type].data["node_size"][mapping[node1]] + g.nodes[node_type].data["node_size"][mapping[node2]]
+                    g.nodes[node_type].data["node_size"][new_node_id] = cuv
+                    duv = g.out_degrees(new_node_id, etype=etype) # TODO
+                    g.nodes[node_type].data[f's{etype}'][new_node_id] = suv  
+                    g.nodes[node_type].data[f'h{etype}'][new_node_id] =  suv / np.sqrt(duv + cuv)
                 
-                mask_node1 =  edges_original[1] == (mapping[node1]).item()
-                mask_node2 =  edges_original[1] == mapping[node2].item()
-                mask = torch.logical_or(mask_node1, mask_node2)
-                edges_dst = torch.unique(edges_original[0][mask])
-                edges_src = torch.full(edges_dst.shape,new_node_id )
-                g.add_edges(edges_dst, edges_src, etype=(src_type, etype,dst_type))
+                if dst_type == node_type:
+                    mask_node1 =  edges_original[1] == (mapping[node1]).item()
+                    mask_node2 =  edges_original[1] == mapping[node2].item()
+                    mask = torch.logical_or(mask_node1, mask_node2)
+                    edges_src = torch.unique(edges_original[0][mask])
+                    edges_dst = torch.full(edges_src.shape,new_node_id )
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
                 
                 
                 
-                suv = g.nodes[node_type].data[f's{etype}'][mapping[node1]] + g.nodes[node_type].data[f's{etype}'][mapping[node2]]
-                cuv = g.nodes[node_type].data["node_size"][mapping[node1]] + g.nodes[node_type].data["node_size"][mapping[node2]]
-                g.nodes[node_type].data["node_size"][new_node_id] = cuv
-                duv = g.out_degrees(new_node_id, etype=etype) # TODO
-                g.nodes[node_type].data[f's{etype}'][new_node_id] = suv  
-                g.nodes[node_type].data[f'h{etype}'][new_node_id] =  suv / np.sqrt(duv + cuv)
-            
             
             if "feat" in g.nodes[node_type].data:
                 old_feats = g.nodes[node_type].data["feat"] 
@@ -445,8 +448,6 @@ class HeteroCoarsener(GraphSummarizer):
             if not src_n.item() in candidates:
                 candidates[src_n.item()] = set()
             candidates[src_n.item()].add(dst_n.item())
-        print("candidates time" , time.time()- start_time)
-        start_time = time.time()   
         costs = torch.zeros(len(src_nodes), device=device)
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
@@ -903,7 +904,7 @@ class Tester():
         new_h_costs = new_h_costs / 2.9831
         for i in range(new_h_costs.shape[0]):
             assert math.isclose(new_h_costs[i].item(), self.coarsener.costs_H[i].item(), rel_tol=1e-2), f"error in updated merge edges {new_h_costs[i]} != {self.coarsener.costs_H[i]}"
-        t = 2
+        
         
     def run_test(self):
         self.g = self.create_test_graph()
@@ -926,9 +927,9 @@ class Tester():
 
 
 if __name__ == "__main__":
-    # tester = Tester()
-    # tester.run_test()
-    dataset = Citeseer() 
+    tester = Tester()
+    tester.run_test()
+    dataset = DBLP() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
