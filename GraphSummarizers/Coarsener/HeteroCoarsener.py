@@ -364,7 +364,6 @@ class HeteroCoarsener(GraphSummarizer):
     def _update_merge_graph_nodes_edges(self, g, node_pairs):
         start_time = time.time()
         mapping = torch.arange(0, g.num_nodes() )
-        nodes_need_edge_weight_recalc = set()
         
         g.edata["needs_check"] = torch.zeros(g.num_edges(), dtype=torch.bool) 
         for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
@@ -403,8 +402,6 @@ class HeteroCoarsener(GraphSummarizer):
             else:
                 mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
                 mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
-            nodes_need_edge_weight_recalc.add(new_node_id)
-            nodes_need_edge_weight_recalc.add(node2)
             
             g.remove_nodes([pre_node1, pre_node2]) 
         print("_update_merge_graph_nodes_edges", time.time()- start_time)   
@@ -546,6 +543,30 @@ class HeteroCoarsener(GraphSummarizer):
     
     
     
+    def _create_h_via_cache(self,  table,ntype, etype, cluster_sizes):
+        cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
+       # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
+        H_merged = dict()
+        
+       # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
+        for node1, merge_nodes in table.items(): # TODO: vectorize
+            merge_nodes = torch.tensor(list(merge_nodes))
+            degree1 = self.coarsened_graph.out_degrees(etype=etype)[node1]
+            degree2 = self.coarsened_graph.out_degrees(etype=etype)[merge_nodes]
+            # merge_s = (cache[merge_nodes] * torch.sqrt(degree2  + cluster_sizes[merge_nodes].squeeze()).unsqueeze(1) )
+            # h = cache[node1] * torch.sqrt(degree1 +cluster_sizes[node1]) + merge_s
+            
+            su = cache[node1]
+            sv = cache[merge_nodes]
+            su = su.repeat(merge_nodes.shape[0], 1)
+            duv = degree1 + degree2 # TODO depended on if nodes are connected
+            cuv = cluster_sizes[node1] + cluster_sizes[merge_nodes]
+            
+            h = (su + sv) / torch.sqrt(duv + cuv.squeeze()).unsqueeze(1)
+            H_merged[node1] = h
+        
+        return H_merged
+    
     def _feature_costs(self,  merge_list):
         costs_dict = dict()
         for ntype in self.coarsened_graph.ntypes:
@@ -589,7 +610,7 @@ class HeteroCoarsener(GraphSummarizer):
                 costs_dict[src_type][etype] = dict()
             
             
-            H_merged = self._create_h_via_cache_vec(merge_list[src_type], src_type, etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
+            H_merged = self._create_h_via_cache(merge_list[src_type], src_type, etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
             
             costs_array = torch.zeros(len(merge_list[src_type]) * self.num_nearest_per_etype *  len(self.coarsened_graph.canonical_etypes) * 10 )
             index_array = torch.zeros(2,len(merge_list[src_type])  *  self.num_nearest_per_etype *(len(self.coarsened_graph.canonical_etypes)  * 10), dtype=torch.int64)
