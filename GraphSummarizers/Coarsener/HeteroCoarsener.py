@@ -455,9 +455,7 @@ class HeteroCoarsener(GraphSummarizer):
             if src_type != ntype:
                 continue
             
-            
-            H_merged = self._create_h_via_cache_vec(candidates,ntype, etype,  self.coarsened_graph.nodes[src_type].data['node_size'])
-            
+            H_merged = self._create_h_via_cache_vec(candidates, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
             
             merged_repr = torch.cat([H_merged[n] for n in candidates.keys()], dim=0)  
 
@@ -508,34 +506,44 @@ class HeteroCoarsener(GraphSummarizer):
             print("_update_merge_graph: WARNING no more merge candidates", time.time()- start_time)    
             return g, mapping, False
            
-            
-   
-    
-
-    
+      
     def _create_h_via_cache_vec(self,  table,ntype, etype, cluster_sizes):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
-       # lists = [sorted(list(v)) for v in cache["authortopaper"].values()]
         H_merged = dict()
         
-       # H_merged = torch.zeros((len(table), 5,cache[etype].shape[1]))
-        for node1, merge_nodes in table.items(): # TODO: vectorize
-            merge_nodes = torch.tensor(list(merge_nodes))
-            degree1 = self.coarsened_graph.out_degrees(etype=etype)[node1]
-            degree2 = self.coarsened_graph.out_degrees(etype=etype)[merge_nodes]
-            # merge_s = (cache[merge_nodes] * torch.sqrt(degree2  + cluster_sizes[merge_nodes].squeeze()).unsqueeze(1) )
-            # h = cache[node1] * torch.sqrt(degree1 +cluster_sizes[node1]) + merge_s
+        # 1) Flatten your table into two 1-D lists of equal length L:
+        pairs = [(u, v) for u, vs in table.items() for v in vs]
+        node1s, node2s = zip(*pairs)
+        node1s = torch.tensor(node1s, dtype=torch.long)
+        node2s = torch.tensor(node2s, dtype=torch.long)
+
+        # 2) Grab degrees and caches in one go:
+        deg = self.coarsened_graph.out_degrees(etype=etype)
+        deg1 = deg[node1s]            # shape (L,)
+        deg2 = deg[node2s]            # shape (L,)
+
+        su = cache[node1s]            # shape (L, D)
+        sv = cache[node2s]            # shape (L, D)
+
+        # 3) Cluster‐size term (make sure cluster_sizes is a tensor):
+        #csize = torch.tensor([cluster_sizes[i] for i in range(self.coarsened_graph.num_nodes())],
+        #                    device=deg.device, dtype=deg.dtype)
+        cuv = cluster_sizes[node1s] + cluster_sizes[node2s]  # shape (L,)
+
+        # 4) Single vectorized compute of h for all L pairs:
+        #    (we broadcast / unsqueeze cuv into the right D-dimensional form)
+        h_all = (su + sv) / torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1) #)  # (L, D)
+
             
-            su = cache[node1]
-            sv = cache[merge_nodes]
-            su = su.repeat(merge_nodes.shape[0], 1)
-            duv = degree1 + degree2 # TODO depended on if nodes are connected
-            cuv = cluster_sizes[node1] + cluster_sizes[merge_nodes]
-            
-            h = (su + sv) / torch.sqrt(duv + cuv.squeeze()).unsqueeze(1)
-            H_merged[node1] = h
-        
+        #    and reassign:
+        for pair, h_chunk in zip(pairs, h_all):
+            node1 = pair[0]
+            if node1 not in H_merged:
+                H_merged[node1] = h_chunk.unsqueeze(0)
+            else:
+                H_merged[node1] = torch.cat((H_merged[node1], h_chunk.unsqueeze(0)), dim=0)
         return H_merged
+    
     
     
     def _feature_costs(self,  merge_list):
@@ -581,8 +589,8 @@ class HeteroCoarsener(GraphSummarizer):
                 costs_dict[src_type][etype] = dict()
             
             
-            
             H_merged = self._create_h_via_cache_vec(merge_list[src_type], src_type, etype, torch.ones(self.coarsened_graph.number_of_nodes(src_type)))
+            
             costs_array = torch.zeros(len(merge_list[src_type]) * self.num_nearest_per_etype *  len(self.coarsened_graph.canonical_etypes) * 10 )
             index_array = torch.zeros(2,len(merge_list[src_type])  *  self.num_nearest_per_etype *(len(self.coarsened_graph.canonical_etypes)  * 10), dtype=torch.int64)
 
@@ -921,14 +929,14 @@ class Tester():
 
 
 if __name__ == "__main__":
-    tester = Tester()
-    tester.run_test()
+    # tester = Tester()
+    # tester.run_test()
     dataset = Citeseer() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
     coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30)
     coarsener.init_step()
-    for i in range(600):
+    for i in range(3):
         print("--------- step: " , i , "---------" )
         coarsener.iteration_step()
