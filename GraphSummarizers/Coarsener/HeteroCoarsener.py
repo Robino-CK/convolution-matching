@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp"
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -61,9 +61,13 @@ class HeteroCoarsener(GraphSummarizer):
         
         self.label_list_supernodes = dict()
         self.init_node_info()
-        
+        self.R = R
         self.minmax_ntype = dict()
         self.minmax_etype = dict()
+        total_num_nodes = original_graph.num_nodes()
+        self.ntype_distribution = dict()
+        for ntype in original_graph.ntypes:
+            self.ntype_distribution[ntype] = original_graph.num_nodes(ntype) / total_num_nodes
         
     
     def init_node_info(self):
@@ -254,7 +258,7 @@ class HeteroCoarsener(GraphSummarizer):
             nodes = set()
             # todo
             for edge_index in lowest_costs.indices:
-                if len(nodes) > self.pairs_per_level: 
+                if len(nodes) > (self.pairs_per_level * self.ntype_distribution[ntype]): 
                     break
                 src_node = edges[0][edge_index].item()
                 dst_node = edges[1][edge_index].item()
@@ -444,7 +448,10 @@ class HeteroCoarsener(GraphSummarizer):
         cv = self.coarsened_graph.nodes[ntype].data["node_size"][dst]        
         
         mid = (f1* cu + f2* cv) / (cu + cv)   # [E'×H]
-        costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
+        if self.R:
+            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.R[ntype])
+        else:
+            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
         print("_update_merge_graph_edge_weigths_features", time.time()- start_time)
         return  costs
         
@@ -477,7 +484,10 @@ class HeteroCoarsener(GraphSummarizer):
 
             cost_src =torch.norm(src_repr - merged_repr,  dim=1, p=1)  # [E]
             cost_dst = torch.norm(dst_repr - merged_repr,  dim=1, p=1)  # [E]
-            total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
+            if self.R:
+                total_cost = (cost_src + cost_dst) / (self.R[etype])
+            else:
+                total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
             costs += total_cost            
             
         print("_update_merge_graph_edge_weights_H", time.time()- start_time)
@@ -649,7 +659,10 @@ class HeteroCoarsener(GraphSummarizer):
             maximum = torch.max(costs_array)
             R = (maximum - minimum + 0.0000000000000001)
             self.minmax_ntype[ntype] = (minimum, maximum,R)
-            costs_array = (costs_array / R)
+            if self.R:
+                costs_array = (costs_array / self.R[ntype])
+            else:
+                costs_array = (costs_array / R)
             costs_dict[ntype] = costs_array
             index_dict[ntype] = index_array
                 
@@ -662,8 +675,10 @@ class HeteroCoarsener(GraphSummarizer):
                 maximum = torch.max(costs_array)
                 R = (maximum - minimum + 0.0000000000000001)
                 self.minmax_etype[etype] = (minimum, maximum, R)
-                
+                if self.R:
+                    R = self.R[etype]
                 if not src_type in costs_dict:
+                    
                     costs_dict[src_type] = (costs_array / R)
                     index_dict[src_type] = index_array
                 else:
