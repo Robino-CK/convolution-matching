@@ -350,7 +350,9 @@ class HeteroCoarsener(GraphSummarizer):
             
             if "feat" in g.nodes[node_type].data:
                 old_feats = g.nodes[node_type].data["feat"] 
-                g.nodes[node_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] + old_feats[mapping[node2]]) / 2
+                cu = g.nodes[node_type].data["node_size"][mapping[node1]]
+                cv = g.nodes[node_type].data["node_size"][mapping[node2]]
+                g.nodes[node_type].data["feat"][new_node_id] = (old_feats[mapping[node1]] * cu  + old_feats[mapping[node2]] * cv ) / (cu + cv)
             
                 
             pre_node1 = mapping[node1].item()
@@ -436,7 +438,11 @@ class HeteroCoarsener(GraphSummarizer):
         # 3) pull features and compute costs
         f1 = feat[src]       # [E'×H]
         f2 = feat[dst]       # [E'×H]
-        mid = (f1 + f2) / 2   # [E'×H]
+        
+        cu = self.coarsened_graph.nodes[ntype].data["node_size"][src]
+        cv = self.coarsened_graph.nodes[ntype].data["node_size"][dst]        
+        
+        mid = (f1* cu + f2* cv) / (cu + cv)   # [E'×H]
         costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
         print("_update_merge_graph_edge_weigths_features", time.time()- start_time)
         return  costs
@@ -572,8 +578,9 @@ class HeteroCoarsener(GraphSummarizer):
                 node2_feats = feat[list(node2_ids)]
                 cost_array = torch.zeros(len(pairs))
                 index_array = torch.zeros(2,len(pairs), dtype=torch.int64)
-
-                new_feats = (node1_feats + node2_feats) / 2
+                cu = self.coarsened_graph.nodes[ntype].data["node_size"][list(node1_ids)]
+                cv = self.coarsened_graph.nodes[ntype].data["node_size"][list(node2_ids)]
+                new_feats = (node1_feats *cu + node2_feats*cv) / (cu + cv)
                 costs = torch.norm(new_feats - node1_feats,  dim=1,p=1) + torch.norm(new_feats - node2_feats,  dim=1, p=1)
                 index = 0
                 for (node1, node2), cost in zip(pairs, costs):
