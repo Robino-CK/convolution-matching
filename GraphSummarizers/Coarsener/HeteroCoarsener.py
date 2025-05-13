@@ -11,7 +11,7 @@ from sklearn.decomposition import PCA
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "../../"))
 from Datasets.Dataset import Dataset
-from test_hetero_coarsening import TestHomo
+from test_hetero_coarsening import TestHomo, TestHetero
 from sklearn.preprocessing import MinMaxScaler
 from GraphSummarizers.GraphSummarizer import GraphSummarizer
 from GraphSummarizers.GraphSummarizer import SUMMARY_GRAPH_FILENAME
@@ -25,7 +25,7 @@ import pickle
 import dgl
 import torch
 import scipy
-from collections import Counter
+from collections import Counter 
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
@@ -222,7 +222,7 @@ class HeteroCoarsener(GraphSummarizer):
         return closest_over_all_etypes
 
     
-    def _init_costs_rgcn(self):
+    def _init_costs(self):
         start_time = time.time()
         init_costs = dict()
         
@@ -237,7 +237,7 @@ class HeteroCoarsener(GraphSummarizer):
                 init_costs[ntype] = self._init_calculate_clostest_features(ntype)    
               
         
-        print("stop init costs", time.time() - start_time)
+        print("_init_costs", time.time() - start_time)
         return init_costs
 
     def _find_lowest_cost_edges(self):
@@ -731,7 +731,7 @@ class HeteroCoarsener(GraphSummarizer):
             self.mappings[ntype] = list()
         
         self._create_h_spatial_rgcn(self.original_graph)
-        init_costs = self._init_costs_rgcn()
+        init_costs = self._init_costs()
         self.init_neighbors = self._get_union(init_costs)
         
         merge_costs, edges = self._costs_of_merges(self.init_neighbors)
@@ -775,7 +775,7 @@ class HeteroCoarsener(GraphSummarizer):
 
 
 if __name__ == "__main__":
-    tester = TestHomo()
+    tester = TestHetero()
     g = tester.g 
     tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30))
     dataset = DBLP() 
