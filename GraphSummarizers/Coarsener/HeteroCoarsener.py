@@ -329,7 +329,15 @@ class HeteroCoarsener(GraphSummarizer):
                     g.nodes[node_type].data[f's{etype}'][new_node_id] = suv  
                     g.nodes[node_type].data[f'h{etype}'][new_node_id] =  suv / np.sqrt(duv + cuv)
                 
-                if dst_type == node_type:
+                if dst_type == src_type:
+                    mask_node1 =  edges_original[1] == (mapping[node1]).item()
+                    mask_node2 =  edges_original[1] == mapping[node2].item()
+                    mask = torch.logical_or(mask_node1, mask_node2)
+                    edges_src = torch.unique(edges_original[0][mask])
+                    edges_dst = torch.full(edges_src.shape,new_node_id )
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                
+                elif dst_type == node_type:
                     mask_node1 =  edges_original[1] == (mapping[node1]).item()
                     mask_node2 =  edges_original[1] == mapping[node2].item()
                     mask = torch.logical_or(mask_node1, mask_node2)
@@ -862,7 +870,7 @@ class Tester():
     def check_first_merge_s_and_h(self):
         correct_s ={
             0: self.s[0],
-            2: (self.s[1] + self.s[2]),
+                2: (self.s[1] + self.s[2]),
             1: (self.s[3] + self.s[4]),
         }
         
