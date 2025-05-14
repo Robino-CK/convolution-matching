@@ -28,7 +28,7 @@ import scipy
 from collections import Counter 
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
-device = "cuda"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = "cpu"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
                  num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None
@@ -43,7 +43,7 @@ class HeteroCoarsener(GraphSummarizer):
         :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
         
         """
-        self.device = "cuda"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = "cpu"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
@@ -173,14 +173,14 @@ class HeteroCoarsener(GraphSummarizer):
         H = H.to(self.device)
 
         # PCA via torch.pca_lowrank if needed
-        if H.size(1) > self.pca_components:
-            # center and normalize
-            mean = H.mean(dim=0, keepdim=True)
-            std = H.std(dim=0, unbiased=False, keepdim=True).clamp(min=1e-4)
-            Hn = (H - mean) / std
-            # low rank PCA
-            U, S, V = torch.pca_lowrank(Hn, q=self.pca_components)
-            H = Hn @ V[:, :self.pca_components]
+        # if H.size(1) > self.pca_components:
+        #     # center and normalize
+        #     mean = H.mean(dim=0, keepdim=True)
+        #     std = H.std(dim=0, unbiased=False, keepdim=True).clamp(min=1e-4)
+        #     Hn = (H - mean) / std
+        #     # low rank PCA
+        #     U, S, V = torch.pca_lowrank(Hn, q=self.pca_components)
+        #     H = Hn @ V[:, :self.pca_components]
 
         return H
 
@@ -377,6 +377,100 @@ class HeteroCoarsener(GraphSummarizer):
         # return both new graph and mapping (if you still need it)
         return new_g, mapping
 
+   
+
+    def _merge_nodes_vec(self, g, node_type, node_pairs):
+            """
+            Merge multiple node pairs in a heterogeneous DGL graph.
+
+            Args:
+                g (dgl.DGLHeteroGraph): The input graph.
+                node_type (str): The node type of the nodes to merge.
+                node_pairs (list of tuple): List of (node1, node2) pairs to merge.
+                feat_key (str): The feature key to average.
+
+            Returns:
+                new_g (dgl.DGLHeteroGraph): Graph with merged nodes.
+                mapping (dict): Mapping from original node IDs to supernode ID.
+            """
+            start_time = time.time()
+            g_new = deepcopy(g)
+            nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64)
+            nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64)
+            orig_nodes = g_new.nodes(node_type)
+            mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
+            num_pairs = len(node_pairs)
+            num_nodes_before = g_new.num_nodes(ntype= node_type)
+            old_feats = g_new.nodes[node_type].data["feat"]
+            cu = g_new.nodes[node_type].data["node_size"][nodes_u]
+            cv = g_new.nodes[node_type].data["node_size"][nodes_v]
+            feat_u = old_feats[nodes_u]
+            feat_v = old_feats[nodes_v]
+            g_new.add_nodes(num_pairs, ntype=node_type)
+            
+            g_new.nodes[node_type].data["node_size"][num_nodes_before:] = cu + cv
+            g_new.nodes[node_type].data["feat"][num_nodes_before:] = (feat_u * cu  + feat_v * cv ) / (cu + cv)
+            new_nodes = g_new.nodes(ntype= node_type)[num_nodes_before:]
+            
+            
+            for src_type, etype,dst_type in g.canonical_etypes:
+                if src_type != node_type and dst_type != node_type:
+                    continue
+                if src_type == node_type:
+                    edges_original = g.edges(etype=etype)
+                    mask_node1 = torch.isin(edges_original[0], nodes_u)
+                    
+                    mask_node2 =  torch.isin(edges_original[0], nodes_v)
+                    mask = torch.logical_or(mask_node1, mask_node2 )
+                    edges_dst = torch.unique(edges_original[1][mask] )
+                    edges_src = torch.full(edges_dst.shape,new_nodes, device=device )
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                    suv = g.nodes[node_type].data[f's{etype}'][nodes_u] + g.nodes[node_type].data[f's{etype}'][nodes_v]
+                    cuv = g.nodes[node_type].data["node_size"][nodes_u] + g.nodes[node_type].data["node_size"][nodes_v]
+                    g.nodes[node_type].data["node_size"][new_nodes] = cuv
+                    duv = g.out_degrees(new_nodes, etype=etype) # TODO
+                    g.nodes[node_type].data[f's{etype}'][new_nodes] = suv  
+                    g.nodes[node_type].data[f'h{etype}'][new_nodes] =  suv / torch.sqrt(duv + cuv)
+                
+                if dst_type == src_type:
+                    mask_node1 =  edges_original[1] == (mapping[nodes_u])
+                    mask_node2 =  edges_original[1] == mapping[nodes_v]
+                    mask = torch.logical_or(mask_node1, mask_node2)
+                    edges_src = torch.unique(edges_original[0][mask])
+                    edges_dst = torch.full(edges_src.shape,new_nodes ,device=device)
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                
+                elif dst_type == node_type:
+                    mask_node1 =  edges_original[1] == (mapping[nodes_u])
+                    mask_node2 =  edges_original[1] == mapping[nodes_v]
+                    mask = torch.logical_or(mask_node1, mask_node2)
+                    edges_src = torch.unique(edges_original[0][mask])
+                    edges_dst = torch.full(edges_src.shape,new_nodes , device=device)
+                    g.add_edges(edges_src, edges_dst, etype=(src_type, etype,dst_type))
+                
+    
+                    
+            
+            
+            
+            mapping[nodes_u] = g_new.nodes(ntype=node_type)[num_nodes_before:]
+            mapping[nodes_v] = g_new.nodes(ntype=node_type)[num_nodes_before:]
+            counts_u = (mapping.unsqueeze(1) > nodes_u).sum(dim=1) 
+            counts_v = (mapping.unsqueeze(1) > nodes_v).sum(dim=1) 
+            
+            mapping = mapping - counts_u - counts_v
+            
+            g_new.remove_nodes(nodes_u, ntype=node_type)
+            g_new.remove_nodes(nodes_v, ntype=node_type)
+            
+          
+                    
+                    
+
+                    
+            print("_merge_nodes", time.time()- start_time)       
+            return g, mapping     
+
     
     def _merge_nodes(self, g, node_type, node_pairs):
         """
@@ -535,7 +629,7 @@ class HeteroCoarsener(GraphSummarizer):
         
         mid = (f1* cu + f2* cv) / (cu + cv)   # [E'×H]
         if self.R:
-            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.R[ntype])
+            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  * (self.R[ntype])
         else:
             costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
         print("_update_merge_graph_edge_weigths_features", time.time()- start_time)
@@ -582,7 +676,7 @@ class HeteroCoarsener(GraphSummarizer):
             cost_src =torch.norm(src_repr - merged_repr,  dim=1, p=1)  # [E]
             cost_dst = torch.norm(dst_repr - merged_repr,  dim=1, p=1)  # [E]
             if self.R:
-                total_cost = (cost_src + cost_dst) / (self.R[etype])
+                total_cost = (cost_src + cost_dst) * (self.R[etype])
             else:
                 total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
             costs += total_cost            
@@ -799,7 +893,7 @@ class HeteroCoarsener(GraphSummarizer):
             self.minmax_ntype[ntype] = (mn, mx, R)
             if self.R:
                 
-                norm = cost / (self.R.get(ntype, R))
+                norm = cost * (self.R.get(ntype, R))
             
             else:
                 norm = cost / R
@@ -814,7 +908,7 @@ class HeteroCoarsener(GraphSummarizer):
                 R = mx - mn + 1e-13
                 self.minmax_etype[etype] = (mn, mx, R)
                 if self.R:
-                    norm = cost / self.R.get(etype, R)
+                    norm = cost * self.R.get(etype, R)
                 else: 
                     norm = cost / R
                 if src in costs_dict:
@@ -913,6 +1007,7 @@ class HeteroCoarsener(GraphSummarizer):
         for ntype, merge_list in self.candidates.items():
             if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
                 continue
+            t, t2 = self._merge_nodes_vec(self.coarsened_graph, ntype, merge_list)
             self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
             self.mappings[ntype].append(mapping)
                 
