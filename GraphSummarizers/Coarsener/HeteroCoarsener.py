@@ -296,7 +296,7 @@ class HeteroCoarsener(GraphSummarizer):
     
     
 
-    def _merge_nodes_vec(self, g, node_type, node_pairs):
+    def _merge_nodes(self, g, node_type, node_pairs):
             """
             Merge multiple node pairs in a heterogeneous DGL graph.
 
@@ -315,7 +315,6 @@ class HeteroCoarsener(GraphSummarizer):
             g_new = deepcopy(g)
             nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64)
             nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64)
-            orig_nodes = g_new.nodes(node_type)
             mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
             num_pairs = len(node_pairs)
             num_nodes_before = g_new.num_nodes(ntype= node_type)
@@ -357,7 +356,7 @@ class HeteroCoarsener(GraphSummarizer):
             nodes_to_delete = torch.cat([nodes_u, nodes_v])           
             g_new.remove_nodes(nodes_to_delete, ntype=node_type)
                 
-            print("_merge_nodes_vec", time.time() - start_time)
+            print("_merge_nodes", time.time() - start_time)
             return g_new, mapping
         
     def _add_merged_edges(self, g_before, g_after, mappings):
@@ -375,55 +374,41 @@ class HeteroCoarsener(GraphSummarizer):
         return g_after
             
                 
-    
-            
-   
     def _update_merge_graph_nodes_edges(self, g, node_pairs):
         start_time = time.time()
+        g_new = deepcopy(g)
+        nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64)
+        nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64)
         mapping = torch.arange(0, g.num_nodes() )
+        num_pairs = len(node_pairs)
+        num_nodes_before = g_new.num_nodes()
+        g_new.add_nodes(num_pairs)
         
-        g.edata["needs_check"] = torch.zeros(g.num_edges(), dtype=torch.bool, device=device) 
-        for node1, node2 in node_pairs: #tqdm(, "merge nodes"):
-            g.add_nodes(1)
-            new_node_id =  g.num_nodes() -1
+        
+        mapping[nodes_u] = g_new.nodes()[num_nodes_before:]
+        mapping[nodes_v] = g_new.nodes()[num_nodes_before:]
+        counts_u = (mapping.unsqueeze(1) > nodes_u).sum(dim=1) 
+        counts_v = (mapping.unsqueeze(1) > nodes_v).sum(dim=1) 
+        
+        mapping = mapping - counts_u - counts_v
+        
+        nodes_to_delete = torch.cat([nodes_u, nodes_v])
+        g_new.remove_nodes(nodes_to_delete)
             
-            edges_original = g.edges()
-            mask_node1 =  torch.where(edges_original[0] == mapping[node1], True, False)
-            mask_node2 =  torch.where(edges_original[0] == mapping[node2], True, False)
-            mask = torch.logical_or(mask_node1, mask_node2)
-            # TODO: dst nneds to be checked maybe too
-            edges_dst = torch.unique(edges_original[1][mask])
-            edges_src = torch.full(edges_dst.shape,new_node_id,device=device )
-            g.add_edges(edges_src, edges_dst)
-            edge_ids = g.edge_ids(edges_src, edges_dst)
-            g.edata["needs_check"][edge_ids] = True
+        all_eids = g_new.edges(form='eid')
+        g_new.remove_edges(all_eids)
+        edges_original = g.edges()
+        new_edges = torch.stack((mapping[edges_original[0]], mapping[edges_original[1]]))
+        new_edges = torch.unique(new_edges, dim=1)
+        
+        g_new.add_edges(new_edges[0], new_edges[1])
+        g_new.edata["needs_check"] = torch.zeros(g_new.num_edges(), dtype=torch.bool, device=device)
+        g_new.edata["needs_check"][g_new.edge_ids(new_edges[0], new_edges[1])] = True
+        g_new = dgl.remove_self_loop(g_new)
+        print("_update_merge_graph_nodes_vec", time.time() - start_time)
+        return g_new
             
-            mask_node1 =  torch.where(edges_original[1] == mapping[node1], True, False)
-            mask_node2 =  torch.where(edges_original[1] == mapping[node2], True, False)
-            mask = torch.logical_or(mask_node1, mask_node2)
-            edges_dst = torch.unique(edges_original[0][mask])
-            edges_src = torch.full(edges_dst.shape,new_node_id,device=device )
-            g.add_edges(edges_dst , edges_src)
-            edge_ids = g.edge_ids(edges_dst, edges_src)
-            g.edata["needs_check"][edge_ids] = True
-            
-            
-            pre_node1 = mapping[node1].item()
-            pre_node2 = mapping[node2].item()
-            mapping[node1] = new_node_id  
-            mapping[node2] = new_node_id
-                
-            if node1 > node2:
-                mapping = torch.where(mapping >pre_node1, mapping -1, mapping)
-                mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
-            else:
-                mapping = torch.where(mapping > pre_node2, mapping -1, mapping)
-                mapping = torch.where(mapping > pre_node1, mapping -1, mapping)
-            
-            g.remove_nodes([pre_node1, pre_node2]) 
-        print("_update_merge_graph_nodes_edges", time.time()- start_time)   
-        return g, mapping
-
+   
 
     def _update_merge_graph_edge_weigths_features(self, g, ntype, eids ):
         start_time = time.time()
@@ -522,25 +507,20 @@ class HeteroCoarsener(GraphSummarizer):
         """
         start_time = time.time()
         
-        g = deepcopy(go)
-        
-        g, mapping = self._update_merge_graph_nodes_edges(g, node_pairs)
-        candidates_to_update = dict()
-        # TODO: take neighboring nodes edges to other nodes into account (neighbors of neighbors) 
-        self.edge_ids_need_recalc = g.edata["needs_check"].nonzero(as_tuple=True)[0]
-                
+        g_before = deepcopy(go)
+        g_coar = self._update_merge_graph_nodes_edges(g_before, node_pairs)
         if len(self.edge_ids_need_recalc) > 0:    
-            self.costs_features = self._update_merge_graph_edge_weigths_features(g,ntype, self.edge_ids_need_recalc)
+            self.costs_features = self._update_merge_graph_edge_weigths_features(g_coar,ntype, self.edge_ids_need_recalc)
             
-            self.costs_H = self._update_merge_graph_edge_weights_H(g, ntype, self.edge_ids_need_recalc)
+            self.costs_H = self._update_merge_graph_edge_weights_H(g_coar, ntype, self.edge_ids_need_recalc)
             
-            g.edata["edge_weight"][self.edge_ids_need_recalc] = self.costs_features 
-            g.edata["edge_weight"][self.edge_ids_need_recalc] += self.costs_H
+            g_coar.edata["edge_weight"][self.edge_ids_need_recalc] = self.costs_features 
+            g_coar.edata["edge_weight"][self.edge_ids_need_recalc] += self.costs_H
             print("_update_merge_graph", time.time()- start_time)    
-            return g, mapping,  True
+            return g_coar,   True
         else:
             print("_update_merge_graph: WARNING no more merge candidates", time.time()- start_time)    
-            return g, mapping, False
+            return g_coar,  False
            
       
     def _create_h_via_cache_vec_fast(self,  table,ntype, etype, cluster_sizes):
@@ -828,7 +808,7 @@ class HeteroCoarsener(GraphSummarizer):
         for ntype, merge_list in self.candidates.items():
             if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
                 continue
-            self.coarsened_graph, mapping = self._merge_nodes_vec(self.coarsened_graph, ntype, merge_list)
+            self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
             self.mappings[ntype].append(mapping) 
            # 
         
@@ -838,7 +818,7 @@ class HeteroCoarsener(GraphSummarizer):
         for ntype, merge_list in self.candidates.items():
             if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
                 continue
-            self.merge_graphs[ntype],_, isNewMergesPerType = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
+            self.merge_graphs[ntype], isNewMergesPerType = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
             isNewMerges = isNewMerges or isNewMergesPerType
         self.candidates = self._find_lowest_cost_edges()
         return isNewMerges
