@@ -28,7 +28,7 @@ import scipy
 from collections import Counter 
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
-device = "cuda"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = "cpu"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
                  num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None
@@ -43,7 +43,7 @@ class HeteroCoarsener(GraphSummarizer):
         :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
         
         """
-        self.device = "cuda"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = "cpu"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
@@ -448,29 +448,13 @@ class HeteroCoarsener(GraphSummarizer):
         
         
         src_nodes , dst_nodes = g.find_edges(eids)  
-        candidates = dict()
-        
-        # 1) a value of 1 for each edge
-        values = torch.ones(src_nodes.size(0), device=src_nodes.device)
-
-        # 2) stack i,j indices
-        indices = torch.stack([src_nodes, dst_nodes], dim=0)
-
-        # move once
-        src_cpu = src_nodes.to("cpu").numpy()
-        dst_cpu = dst_nodes.to("cpu").numpy()
-
-        candidates = {}
-        for s, d in zip(src_cpu, dst_cpu):
-            # this is now pure numpy ints – no per-element .item()
-            candidates.setdefault(int(s), set()).add(int(d))
         costs = torch.zeros(len(src_nodes), device=device)
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
                 continue
             
-            merged_repr = self._create_h_via_cache_vec_fast(candidates, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
+            merged_repr = self._create_h_via_cache_vec_fast_without_table(src_nodes, dst_nodes, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
             
             #merged_repr = torch.cat([H_merged[n] for n in candidates.keys()], dim=0)  
 
@@ -554,6 +538,32 @@ class HeteroCoarsener(GraphSummarizer):
 
         return h_all
    
+    def _create_h_via_cache_vec_fast_without_table(self,  node1s, node2s,ntype, etype, cluster_sizes):
+        cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
+        H_merged = dict()
+        
+        # 1) Flatten your table into two 1-D lists of equal length L:
+        node1s = torch.tensor(node1s, dtype=torch.long)
+        node2s = torch.tensor(node2s, dtype=torch.long)
+
+        # 2) Grab degrees and caches in one go:
+        deg = self.coarsened_graph.out_degrees(etype=etype)
+        deg1 = deg[node1s]            # shape (L,)
+        deg2 = deg[node2s]            # shape (L,)
+
+        su = cache[node1s]            # shape (L, D)
+        sv = cache[node2s]            # shape (L, D)
+
+        # 3) Cluster‐size term (make sure cluster_sizes is a tensor):
+        #csize = torch.tensor([cluster_sizes[i] for i in range(self.coarsened_graph.num_nodes())],
+        #                    device=deg.device, dtype=deg.dtype)
+        cuv = cluster_sizes[node1s] + cluster_sizes[node2s]  # shape (L,)
+
+        # 4) Single vectorized compute of h for all L pairs:
+        #    (we broadcast / unsqueeze cuv into the right D-dimensional form)
+        h_all = (su + sv) / torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1) #)  # (L, D)
+
+        return h_all
     
     def _create_h_via_cache_vec(self,  table,ntype, etype, cluster_sizes):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
