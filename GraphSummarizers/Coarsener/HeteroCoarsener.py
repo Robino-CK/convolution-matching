@@ -749,7 +749,29 @@ class HeteroCoarsener(GraphSummarizer):
             
             
             
+    def _get_master_mapping_tensor(self, mappings, ntype):
+        # 1) Grab all the node IDs of type ntype as a 1D LongTensor
+        nodes = self.coarsened_graph.nodes(ntype)              # e.g. tensor([0,1,2,3,…], device='cuda:0')
         
+        # 2) Build an initial “identity” tensor so that mapping[i] = i
+        #    size should cover the full ID range of that node type
+        num_nodes = self.coarsened_graph.number_of_nodes(ntype)
+        device = nodes.device
+        composed = torch.arange(num_nodes, device=device, dtype=torch.long)
+        
+        # 3) Sequentially compose each mapping—this all happens on the GPU
+        #    assume each m in mappings is a LongTensor of shape (num_nodes,)
+        for m in mappings:
+            # m[mapping] gives you the “next” mapping for every element
+            composed = m[composed]
+        
+        # 4) Now `composed[i]` is the final image of node i under the chain of maps.
+        #    If you only care about your particular node subset:
+        final_ids = composed[nodes]
+        
+        master_mapping = {int(u): int(v) for u, v in zip(nodes.tolist(), final_ids.tolist())}    
+        return master_mapping  # both are 1D tensors of the same length
+
        
     
     def _get_master_mapping(self, mappings, ntype):
@@ -812,26 +834,26 @@ class HeteroCoarsener(GraphSummarizer):
    
    #     pickle.dump(self, open(file_name, "wb"))
     
+
+    
     
     def iteration_step(self):
         isNewMerges = False
         g1 = deepcopy(self.coarsened_graph)
-        
+        if self.original_graph.number_of_nodes() * self.r >  self.coarsened_graph.number_of_nodes():
+            return False
         for ntype, merge_list in self.candidates.items():
-            if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
-                continue
             self.coarsened_graph, mapping = self._merge_nodes(self.coarsened_graph, ntype, merge_list)
             self.mappings[ntype].append(mapping) 
            # 
-        
+                
         
         self.coarsened_graph = self._add_merged_edges(g1,self.coarsened_graph, self.mappings)
         
         for ntype, merge_list in self.candidates.items():
-            if (self.original_graph.number_of_nodes(ntype) * self.r >  self.coarsened_graph.number_of_nodes(ntype)):
-                continue
             self.merge_graphs[ntype], isNewMergesPerType = self._update_merge_graph(self.merge_graphs[ntype], merge_list, ntype)
             isNewMerges = isNewMerges or isNewMergesPerType
+ 
         self.candidates = self._find_lowest_cost_edges()
         return isNewMerges
 
@@ -847,15 +869,18 @@ class HeteroCoarsener(GraphSummarizer):
         return self.coarsened_graph
     
     def get_mapping(self, ntype):
+        t = self._get_master_mapping_tensor(self.mappings[ntype], ntype)
+        t2 = self._get_master_mapping(self.mappings[ntype], ntype )
+        
         return self._get_master_mapping(self.mappings[ntype], ntype )
         
 
 
 
 if __name__ == "__main__":
-    tester = TestHomo()
+    tester = TestHetero()
     g = tester.g 
-    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30))
+  #  tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30))
     dataset = DBLP() 
     original_graph = dataset.load_graph()
 
@@ -865,3 +890,4 @@ if __name__ == "__main__":
     for i in range(3):
         print("--------- step: " , i , "---------" )
         coarsener.iteration_step()
+        coarsener.get_mapping("author")
