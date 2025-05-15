@@ -28,7 +28,7 @@ import scipy
 from collections import Counter 
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
-device = "cpu"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = "cuda"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
                  num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None
@@ -43,7 +43,7 @@ class HeteroCoarsener(GraphSummarizer):
         :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
         
         """
-        self.device = "cpu"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = "cuda"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
@@ -313,9 +313,9 @@ class HeteroCoarsener(GraphSummarizer):
             
             start_time = time.time()
             g_new = deepcopy(g)
-            nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64)
-            nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64)
-            mapping = torch.arange(0, g.num_nodes(ntype=node_type) )
+            nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=device)
+            nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=device)
+            mapping = torch.arange(0, g.num_nodes(ntype=node_type), device=device )
             num_pairs = len(node_pairs)
             num_nodes_before = g_new.num_nodes(ntype= node_type)
             old_feats = g_new.nodes[node_type].data["feat"]
@@ -377,9 +377,9 @@ class HeteroCoarsener(GraphSummarizer):
     def _update_merge_graph_nodes_edges(self, g, node_pairs):
         start_time = time.time()
         g_new = deepcopy(g)
-        nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64)
-        nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64)
-        mapping = torch.arange(0, g.num_nodes() )
+        nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=device)
+        nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=device)
+        mapping = torch.arange(0, g.num_nodes() , device=device)
         num_pairs = len(node_pairs)
         num_nodes_before = g_new.num_nodes()
         g_new.add_nodes(num_pairs)
@@ -509,6 +509,8 @@ class HeteroCoarsener(GraphSummarizer):
         
         g_before = deepcopy(go)
         g_coar = self._update_merge_graph_nodes_edges(g_before, node_pairs)
+        self.edge_ids_need_recalc = g_coar.edata["needs_check"].nonzero(as_tuple=True)[0]
+        
         if len(self.edge_ids_need_recalc) > 0:    
             self.costs_features = self._update_merge_graph_edge_weigths_features(g_coar,ntype, self.edge_ids_need_recalc)
             
