@@ -750,26 +750,24 @@ class HeteroCoarsener(GraphSummarizer):
             
             
     def _get_master_mapping_tensor(self, mappings, ntype):
-        # 1) Grab all the node IDs of type ntype as a 1D LongTensor
-        nodes = self.coarsened_graph.nodes(ntype)              # e.g. tensor([0,1,2,3,…], device='cuda:0')
+        master_mapping = dict()
+        nodes_orig = self.original_graph.nodes(ntype)
+        nodes = self.original_graph.nodes(ntype)
+        for mapping in mappings:
+            nodes = mapping[nodes]
+        for i in range(len(nodes)):
+            master_mapping[nodes_orig[i].item()] = nodes[i].item()
         
-        # 2) Build an initial “identity” tensor so that mapping[i] = i
-        #    size should cover the full ID range of that node type
-        num_nodes = self.coarsened_graph.number_of_nodes(ntype)
-        device = nodes.device
-        composed = torch.arange(num_nodes, device=device, dtype=torch.long)
+        return master_mapping    
         
-        # 3) Sequentially compose each mapping—this all happens on the GPU
-        #    assume each m in mappings is a LongTensor of shape (num_nodes,)
-        for m in mappings:
-            # m[mapping] gives you the “next” mapping for every element
-            composed = m[composed]
         
-        # 4) Now `composed[i]` is the final image of node i under the chain of maps.
-        #    If you only care about your particular node subset:
-        final_ids = composed[nodes]
+        for node in self.original_graph.nodes(ntype):
+            node_id = node.item()
+            for mapping in mappings:
+                node_id = mapping[node_id].item()
+            master_mapping[node.item()] = node_id
+        return master_mapping
         
-        master_mapping = {int(u): int(v) for u, v in zip(nodes.tolist(), final_ids.tolist())}    
         return master_mapping  # both are 1D tensors of the same length
 
        
@@ -870,9 +868,9 @@ class HeteroCoarsener(GraphSummarizer):
     
     def get_mapping(self, ntype):
         t = self._get_master_mapping_tensor(self.mappings[ntype], ntype)
-        t2 = self._get_master_mapping(self.mappings[ntype], ntype )
+    #    t2 = self._get_master_mapping(self.mappings[ntype], ntype )
         
-        return self._get_master_mapping(self.mappings[ntype], ntype )
+        return self._get_master_mapping_tensor(self.mappings[ntype], ntype )
         
 
 
