@@ -28,10 +28,10 @@ import scipy
 from collections import Counter 
 from copy import deepcopy
 CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
-device = "cpu"# torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -43,18 +43,21 @@ class HeteroCoarsener(GraphSummarizer):
         :param num_nearest_per_etype: The number of nearest neighbors to consider for each node per edge type in init step, from here we can get the number of number of edges in merge graph which is in [num_nearest_per_etype, number of etypes * num_nearest_per_etype]  
         
         """
-        self.device = "cpu"#torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if device:
+            self.device = device
+        else: 
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
         self.pca_components = 3
-        self.original_graph = original_graph.to(device)
+        self.original_graph = original_graph.to(self.device)
         self.dataset = dataset
         self.num_nearest_neighbors = num_nearest_neighbors
         self.num_nearest_per_etype = num_nearest_per_etype
         self.pairs_per_level = pairs_per_level
         self.coarsened_graph = original_graph.clone()
-        self.coarsened_graph = self.coarsened_graph.to(device)
+        self.coarsened_graph = self.coarsened_graph.to(self.device)
         self.merge_graph = None
         self.node_types = dict()
         self.candidate_pairs = None
@@ -102,14 +105,14 @@ class HeteroCoarsener(GraphSummarizer):
             has_feat = 'feat' in g.nodes[dst_type].data
 
             # Precompute normalized degrees
-            deg_out = torch.tensor(self.node_degrees[etype]['out'], device=device) + 1.0
-            deg_in  = torch.tensor(self.node_degrees[etype]['in'], device=device)  + 1.0
+            deg_out = torch.tensor(self.node_degrees[etype]['out'], device=self.device) + 1.0
+            deg_in  = torch.tensor(self.node_degrees[etype]['in'], device=self.device)  + 1.0
             inv_sqrt_out = torch.rsqrt(deg_out)
             inv_sqrt_in  = torch.rsqrt(deg_in)
 
             # Load features or use scalar 1
             if has_feat:
-                feats = g.nodes[dst_type].data['feat'].to(device)
+                feats = g.nodes[dst_type].data['feat'].to(self.device)
                 feat_dim = feats.shape[1]
             else:
                 # treat feature as scalar 1
@@ -117,19 +120,19 @@ class HeteroCoarsener(GraphSummarizer):
 
             # Extract all edges of this type
             u, v = g.edges(etype=(src_type, etype, dst_type))
-            u = u.to(device)
-            v = v.to(device)
+            u = u.to(self.device)
+            v = v.to(self.device)
 
             # Gather destination feats & normalize
             if has_feat:
                 feat_v = feats[v]                              # [E, D]
             else:
-                feat_v = torch.ones((v.shape[0], 1), device=device)
+                feat_v = torch.ones((v.shape[0], 1), device=self.device)
             s_e = feat_v * inv_sqrt_in[v].unsqueeze(-1)       # [E, D]
 
             # Scatter-add to compute S at source nodes
             n_src = g.num_nodes(src_type)
-            S_tensor = torch.zeros((n_src, feat_dim), device=device)
+            S_tensor = torch.zeros((n_src, feat_dim), device=self.device)
             S_tensor = S_tensor.index_add(0, u, s_e)
 
             # Compute H = D_out^{-1/2} * S
@@ -138,7 +141,7 @@ class HeteroCoarsener(GraphSummarizer):
             # Store in coarsened_graph
             self.coarsened_graph.nodes[src_type].data[f's{etype}'] = S_tensor
             self.coarsened_graph.nodes[src_type].data[f'h{etype}'] = H_tensor
-            self.coarsened_graph.nodes[src_type].data['node_size']  = torch.ones((n_src, 1), device=device)
+            self.coarsened_graph.nodes[src_type].data['node_size']  = torch.ones((n_src, 1), device=self.device)
 
         print("_create_h_spatial_rgcn", time.time() - start_time)
         
@@ -150,7 +153,7 @@ class HeteroCoarsener(GraphSummarizer):
         start_time = time.time()
         self.merge_graphs =dict()
         for ntype in self.coarsened_graph.ntypes:
-            self.merge_graphs [ntype] = dgl.graph(([], []), num_nodes=self.coarsened_graph.number_of_nodes(ntype=ntype), device=device)
+            self.merge_graphs [ntype] = dgl.graph(([], []), num_nodes=self.coarsened_graph.number_of_nodes(ntype=ntype), device=self.device)
             
             self.merge_graphs[ntype].add_edges(edges[ntype][0,:],  edges[ntype][1,:])
             self.merge_graphs[ntype].edata["edge_weight"] = costs[ntype]
@@ -313,9 +316,9 @@ class HeteroCoarsener(GraphSummarizer):
             
             start_time = time.time()
             g_new = deepcopy(g)
-            nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=device)
-            nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=device)
-            mapping = torch.arange(0, g.num_nodes(ntype=node_type), device=device )
+            nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=self.device)
+            nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=self.device)
+            mapping = torch.arange(0, g.num_nodes(ntype=node_type), device=self.device )
             num_pairs = len(node_pairs)
             num_nodes_before = g_new.num_nodes(ntype= node_type)
             old_feats = g_new.nodes[node_type].data["feat"]
@@ -377,9 +380,9 @@ class HeteroCoarsener(GraphSummarizer):
     def _update_merge_graph_nodes_edges(self, g, node_pairs):
         start_time = time.time()
         g_new = deepcopy(g)
-        nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=device)
-        nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=device)
-        mapping = torch.arange(0, g.num_nodes() , device=device)
+        nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=self.device)
+        nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=self.device)
+        mapping = torch.arange(0, g.num_nodes() , device=self.device)
         num_pairs = len(node_pairs)
         num_nodes_before = g_new.num_nodes()
         g_new.add_nodes(num_pairs)
@@ -402,7 +405,7 @@ class HeteroCoarsener(GraphSummarizer):
         new_edges = torch.unique(new_edges, dim=1)
         
         g_new.add_edges(new_edges[0], new_edges[1])
-        g_new.edata["needs_check"] = torch.zeros(g_new.num_edges(), dtype=torch.bool, device=device)
+        g_new.edata["needs_check"] = torch.zeros(g_new.num_edges(), dtype=torch.bool, device=self.device)
         g_new.edata["needs_check"][g_new.edge_ids(new_edges[0], new_edges[1])] = True
         g_new = dgl.remove_self_loop(g_new)
         print("_update_merge_graph_nodes_vec", time.time() - start_time)
@@ -415,8 +418,7 @@ class HeteroCoarsener(GraphSummarizer):
         if "feat" not in self.coarsened_graph.nodes[ntype].data:
             return
         feat = self.coarsened_graph.nodes[ntype].data['feat']
-        device = feat.device
-
+        
         # 1) Build flat src/dst lists
         src , dst = g.find_edges(eids)  
       
@@ -448,7 +450,7 @@ class HeteroCoarsener(GraphSummarizer):
         
         
         src_nodes , dst_nodes = g.find_edges(eids)  
-        costs = torch.zeros(len(src_nodes), device=device)
+        costs = torch.zeros(len(src_nodes), device=self.device)
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
@@ -610,7 +612,7 @@ class HeteroCoarsener(GraphSummarizer):
                 continue
 
             feat = data["feat"]                   # [N, F]
-            size = data["node_size"].to(device)   # [N]
+            size = data["node_size"].to(self.device)   # [N]
 
             # build flat list of all valid (u,v) pairs
             starts, ends = [], []
@@ -619,8 +621,8 @@ class HeteroCoarsener(GraphSummarizer):
                 vs = [v for v in vs if v != u]
                 if not vs:
                     continue
-                starts.append(torch.full((len(vs),), u, dtype=torch.long, device=device))
-                ends.append(torch.tensor(vs, dtype=torch.long, device=device))
+                starts.append(torch.full((len(vs),), u, dtype=torch.long, device=self.device))
+                ends.append(torch.tensor(vs, dtype=torch.long, device=self.device))
 
             if not starts:
                 continue
@@ -655,7 +657,7 @@ class HeteroCoarsener(GraphSummarizer):
             # compute all merged h representations in one go
             H_merged = self._create_h_via_cache_vec_fast(
                 merge_list[src], src, etype,
-                torch.ones(self.coarsened_graph.number_of_nodes(src), device=device)
+                torch.ones(self.coarsened_graph.number_of_nodes(src), device=self.device)
             )  # [N_src, hidden]
 
             # flatten all (u,v) pairs same as above
@@ -664,8 +666,8 @@ class HeteroCoarsener(GraphSummarizer):
                 vs = [v for v in vs if v != u]
                 if not vs:
                     continue
-                starts.append(torch.full((len(vs),), u, dtype=torch.long, device=device))
-                ends.append(torch.tensor(vs, dtype=torch.long, device=device))
+                starts.append(torch.full((len(vs),), u, dtype=torch.long, device=self.device))
+                ends.append(torch.tensor(vs, dtype=torch.long, device=self.device))
 
             if not starts:
                 continue
@@ -878,7 +880,7 @@ class HeteroCoarsener(GraphSummarizer):
 if __name__ == "__main__":
     tester = TestHetero()
     g = tester.g 
-  #  tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30))
+    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, device="cpu"))
     dataset = DBLP() 
     original_graph = dataset.load_graph()
 
