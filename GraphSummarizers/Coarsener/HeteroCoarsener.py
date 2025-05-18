@@ -420,18 +420,18 @@ class HeteroCoarsener(GraphSummarizer):
         feat = self.coarsened_graph.nodes[ntype].data['feat']
         
         # 1) Build flat src/dst lists
-        src , dst = g.find_edges(eids)  
+        nodes_u , nodes_v = g.find_edges(eids)  
       
         # 2) mask out self‐pairs (if any)
-        mask = src != dst
-        src, dst = src[mask], dst[mask]                                         # [E']
+        mask = nodes_u != nodes_v
+        nodes_u, nodes_v = nodes_u[mask], nodes_v[mask]                                         # [E']
 
         # 3) pull features and compute costs
-        f1 = feat[src]       # [E'×H]
-        f2 = feat[dst]       # [E'×H]
+        f1 = feat[nodes_u]       # [E'×H]
+        f2 = feat[nodes_v]       # [E'×H]
         
-        cu = self.coarsened_graph.nodes[ntype].data["node_size"][src]
-        cv = self.coarsened_graph.nodes[ntype].data["node_size"][dst]        
+        cu = self.coarsened_graph.nodes[ntype].data["node_size"][nodes_u]
+        cv = self.coarsened_graph.nodes[ntype].data["node_size"][nodes_v]        
         
         mid = (f1* cu + f2* cv) / (cu + cv)   # [E'×H]
         if self.R:
@@ -449,22 +449,32 @@ class HeteroCoarsener(GraphSummarizer):
         start_time = time.time()
         
         
-        src_nodes , dst_nodes = g.find_edges(eids)  
-        costs = torch.zeros(len(src_nodes), device=self.device)
+        nodes_u , nodes_v = g.find_edges(eids)  
+        costs = torch.zeros(len(nodes_u), device=self.device)
         
         for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             if src_type != ntype:
                 continue
             
-            merged_repr = self._create_h_via_cache_vec_fast_without_table(src_nodes, dst_nodes, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
             
-            #merged_repr = torch.cat([H_merged[n] for n in candidates.keys()], dim=0)  
+                
+            
+            merged_repr = self._create_h_via_cache_vec_fast_without_table(nodes_u, nodes_v, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
+            
+            
+            # src, neigbors_u = self.coarsened_graph.out_edges(nodes_u, etype=etype)
+            # neighbors_u_h = self.coarsened_graph.nodes[dst_type].data["hcites"][neigbors_u]
+            # su = self.coarsened_graph.nodes[src_type].data[f's{etype}'][nodes_u]
+            # suv = merged_repr
+            # neighbors_influence_u = np.sqrt(di + ci) * (self.coarsened_graph.nodes[dst_type].data["scites"][neigbors_u] - su + suv)
+            # u_neighbor_costs = neighbors_u_h -  
+            
+            
+            repr_u = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][nodes_u]   # TODO: wrong !!!
+            repr_v = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][nodes_v]   
 
-            src_repr = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][src_nodes]   # TODO: wrong !!!
-            dst_repr = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][dst_nodes]   
-
-            cost_src =torch.norm(src_repr - merged_repr,  dim=1, p=1)  # [E]
-            cost_dst = torch.norm(dst_repr - merged_repr,  dim=1, p=1)  # [E]
+            cost_src =torch.norm(repr_u - merged_repr,  dim=1, p=1)  # [E]
+            cost_dst = torch.norm(repr_v - merged_repr,  dim=1, p=1)  # [E]
             if self.R:
                 total_cost = (cost_src + cost_dst) * (self.R[etype])
             else:
@@ -513,7 +523,6 @@ class HeteroCoarsener(GraphSummarizer):
       
     def _create_h_via_cache_vec_fast(self,  table,ntype, etype, cluster_sizes):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
-        H_merged = dict()
         
         # 1) Flatten your table into two 1-D lists of equal length L:
         pairs = [(u, v) for u, vs in table.items() for v in vs]
@@ -542,7 +551,6 @@ class HeteroCoarsener(GraphSummarizer):
    
     def _create_h_via_cache_vec_fast_without_table(self,  node1s, node2s,ntype, etype, cluster_sizes):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
-        H_merged = dict()
         
         # 1) Flatten your table into two 1-D lists of equal length L:
         node1s = torch.tensor(node1s, dtype=torch.long)
