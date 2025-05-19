@@ -462,12 +462,7 @@ class HeteroCoarsener(GraphSummarizer):
             merged_repr = self._create_h_via_cache_vec_fast_without_table(nodes_u, nodes_v, src_type, etype, self.coarsened_graph.nodes[src_type].data['node_size'])
             
             
-            # src, neigbors_u = self.coarsened_graph.out_edges(nodes_u, etype=etype)
-            # neighbors_u_h = self.coarsened_graph.nodes[dst_type].data["hcites"][neigbors_u]
-            # su = self.coarsened_graph.nodes[src_type].data[f's{etype}'][nodes_u]
-            # suv = merged_repr
-            # neighbors_influence_u = np.sqrt(di + ci) * (self.coarsened_graph.nodes[dst_type].data["scites"][neigbors_u] - su + suv)
-            # u_neighbor_costs = neighbors_u_h -  
+           
             
             
             repr_u = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][nodes_u]   # TODO: wrong !!!
@@ -659,18 +654,18 @@ class HeteroCoarsener(GraphSummarizer):
     
     def _h_costs(self, merge_list):
         costs_dict = {}
-        for src, etype, dst in self.coarsened_graph.canonical_etypes:
+        for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
             # ensure nested dict
-            costs_dict.setdefault(src, {})[etype] = {}
+            costs_dict.setdefault(src_type, {})[etype] = {}
             # compute all merged h representations in one go
             H_merged = self._create_h_via_cache_vec_fast(
-                merge_list[src], src, etype,
-                torch.ones(self.coarsened_graph.number_of_nodes(src), device=self.device)
+                merge_list[src_type], src_type, etype,
+                torch.ones(self.coarsened_graph.number_of_nodes(src_type), device=self.device)
             )  # [N_src, hidden]
 
             # flatten all (u,v) pairs same as above
             starts, ends = [], []
-            for u, vs in merge_list[src].items():
+            for u, vs in merge_list[src_type].items():
                 vs = [v for v in vs if v != u]
                 if not vs:
                     continue
@@ -684,17 +679,30 @@ class HeteroCoarsener(GraphSummarizer):
             node2_ids = torch.cat(ends)    # [P]
 
             # gather representations
-            h1 = self.coarsened_graph.nodes[src].data[f"h{etype}"][node1_ids]  # [P, H]
-            h2 = self.coarsened_graph.nodes[src].data[f"h{etype}"][node2_ids]  # [P, H]
+            h1 = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][node1_ids]  # [P, H]
+            h2 = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][node2_ids]  # [P, H]
              # build a dense [num_src, hidden] tensor
             #H_tensor =  torch.tensor([v for k,v in  H_merged.items()] , device=device)
             merged = H_merged                               # [P, H]
-
+            
+            
+            for src_type_2, etype_2, dst_type_2 in self.coarsened_graph.canonical_etypes:
+                if src_type != dst_type_2:
+                    continue
+                neigbors_u, _ = self.coarsened_graph.in_edges(node1_ids, etype=etype_2)
+                neighbors_u_h = self.coarsened_graph.nodes[src_type_2].data[f"h{etype_2}"][neigbors_u]
+                su = self.coarsened_graph.nodes[src_type_2].data[f's{etype_2}'][node1_ids]
+                #suv = merged_repr
+                ci = self.coarsened_graph.nodes[src_type_2].data["node_size"][neigbors_u]
+                cu = self.coarsened_graph.nodes[src_type_2].data["node_size"][node1_ids]
+                di = self.coarsened_graph.out_degrees(etype=etype)
+                new_neighbor_h = np.sqrt(di + ci + cu) * (self.coarsened_graph.nodes[dst_type_2].data[f"s{etype}"][neigbors_u] - su)
+                u_neighbor_costs = neighbors_u_h - new_neighbor_h 
             # L1 costs
             cost = torch.norm(merged - h1, p=1, dim=1) + torch.norm(merged - h2, p=1, dim=1)
         #    cost = (h1 - merged).abs().sum(dim=1) + (h2 - merged).abs().sum(dim=1)  # [P]
 
-            costs_dict[src][etype] = {
+            costs_dict[src_type][etype] = {
                 "costs": cost,
                 "index": torch.stack([node1_ids, node2_ids], dim=0)
             }
