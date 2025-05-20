@@ -258,3 +258,34 @@ class HeteroSGC(torch.nn.Module):
             return target_logits, h_dict
         else:
             return target_logits
+
+
+import dgl
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dgl.data import CiteseerGraphDataset
+from sklearn.decomposition import PCA
+from dgl.nn import HeteroGraphConv, GraphConv
+
+class HeteroGCNCiteer(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim, rel_names):
+        super().__init__()
+        # conv1: in_dim -> hidden_dim for each relation
+        self.conv1 = HeteroGraphConv({
+            rel: GraphConv(in_dim, hidden_dim)
+            for rel in rel_names
+        }, aggregate='sum')
+        # conv2: hidden_dim -> out_dim for each relation
+        self.conv2 = HeteroGraphConv({
+            rel: GraphConv(hidden_dim, out_dim)
+            for rel in rel_names
+        }, aggregate='sum')
+
+    def forward(self, graph, x_dict):
+        # x_dict: {'paper': feature_tensor}
+        h_dict = self.conv1(graph, x_dict)
+        # apply activation
+        h_dict = {ntype: F.relu(h) for ntype, h in h_dict.items()}
+        h_dict = self.conv2(graph, h_dict)
+        return h_dict
