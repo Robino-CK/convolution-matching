@@ -369,9 +369,13 @@ class HeteroCoarsener(GraphSummarizer):
             all_eids = g_after.edges(form='eid', etype=etype)
             g_after.remove_edges(all_eids, etype=etype)
             edges_original = g_before.edges(etype=etype)
+          #  edges_adj = g_before.edges[etype].data["adj"]
             new_edges = torch.stack((mapping_src[edges_original[0]], mapping_dst[edges_original[1]]))
-            new_edges = torch.unique(new_edges, dim=1)
-            g_after.add_edges(new_edges[0], new_edges[1], etype=(src_type, etype, dst_type))
+            new_edges, counts = torch.unique(new_edges, return_counts=True, dim=1)
+            #new_edges = torch.unique(new_edges, dim=1)
+            
+            eids = g_after.add_edges(new_edges[0], new_edges[1], etype=(src_type, etype, dst_type))
+           # g_after.edges[etype].data["adj"][eids] = counts
             if src_type == dst_type:
                 g_after = dgl.remove_self_loop(g_after, etype=etype)
         return g_after
@@ -443,8 +447,9 @@ class HeteroCoarsener(GraphSummarizer):
         
         
     def _update_merge_graph_edge_weigts_neig_H(self,costs, src_type, etype, nodes_u_old, nodes_v_old):
+        
         for src_type_2, etype_2, dst_type_2 in self.coarsened_graph.canonical_etypes:
-            if src_type != dst_type_2 or src_type == src_type_2:
+            if src_type != dst_type_2:
                 continue
             
             feat1 = self.coarsened_graph.nodes[src_type].data["feat"][nodes_u_old]
@@ -487,8 +492,8 @@ class HeteroCoarsener(GraphSummarizer):
                 neigbors_v_extra_costs = neigbors_v_extra_costs  * (self.minmax_etype[etype_2][2])  
                 #   total_cost = (cost_src + cost_dst) / 
             
-            costs = costs.index_add(0, nodes_u, neighbors_u_extra_costs)
-            costs = costs.index_add(0, nodes_v, neigbors_v_extra_costs)
+            costs.index_add_(0, nodes_u, neighbors_u_extra_costs)
+            costs.index_add_(0, nodes_v, neigbors_v_extra_costs)
 
             
 
@@ -718,6 +723,7 @@ class HeteroCoarsener(GraphSummarizer):
                 merge_list[src_type], src_type, etype,
                 torch.ones(self.coarsened_graph.number_of_nodes(src_type), device=self.device)
             )  # [N_src, hidden]
+            #self.coarsened_graph.edges[etype].data["adj"] = torch.ones(self.coarsened_graph.num_edges(etype=etype))
 
             # flatten all (u,v) pairs same as above
             starts, ends = [], []
@@ -775,9 +781,10 @@ class HeteroCoarsener(GraphSummarizer):
             node1_ids = torch.cat(starts)  # [P]
             node2_ids = torch.cat(ends)    # [P]
             for src_type_2, etype_2, dst_type_2 in self.coarsened_graph.canonical_etypes:
-                costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
+                
                 if src_type != dst_type_2:
                     continue
+                costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
                 
                 
                 
@@ -1025,14 +1032,14 @@ class HeteroCoarsener(GraphSummarizer):
 if __name__ == "__main__":
     tester = TestHetero()
     g = tester.g 
-    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, device="cpu"))
+   # tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, device="cpu"))
     dataset = DBLP() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
-    coarsener = HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=30, device="cpu")
+    coarsener =  HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=10, num_nearest_neighbors=30,pairs_per_level=50, is_neighboring_h=True) 
     coarsener.init_step()
     for i in range(3):
         print("--------- step: " , i , "---------" )
         coarsener.iteration_step()
-        coarsener.get_mapping("author")
+       # coarsener.get_mapping("author")
