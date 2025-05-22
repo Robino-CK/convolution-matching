@@ -355,9 +355,10 @@ class HeteroCoarsener(GraphSummarizer):
                 repeat_dst = nodes_v.unsqueeze(1).repeat(1, edges_original[0].shape[0])
                 edges_src = repeat_src == edges_original[0].unsqueeze(0).repeat(repeat_src.shape[0], 1) 
                 edges_dst = repeat_dst == edges_original[0].unsqueeze(0).repeat(repeat_dst.shape[0], 1)
-                edges_src_dst = torch.logical_or(edges_src, edges_dst)
-                duv = edges_src_dst.sum(dim=1)
                 
+                edges_src_dst = torch.logical_or(edges_src, edges_dst)
+                #duv = edges_src_dst.sum(dim=1)
+                duv = edges_src.sum(dim=1) + edges_dst.sum(dim=1)
                 
                 infl_u =  g.nodes[node_type].data[f'i{etype}'][nodes_u]
                 infl_v = g.nodes[node_type].data[f'i{etype}'][nodes_v]
@@ -382,13 +383,13 @@ class HeteroCoarsener(GraphSummarizer):
             all_eids = g_after.edges(form='eid', etype=etype)
             g_after.remove_edges(all_eids, etype=etype)
             edges_original = g_before.edges(etype=etype)
-          #  edges_adj = g_before.edges[etype].data["adj"]
+            edges_adj = g_before.edges[etype].data["adj"]
             new_edges = torch.stack((mapping_src[edges_original[0]], mapping_dst[edges_original[1]]))
             new_edges, counts = torch.unique(new_edges, return_counts=True, dim=1)
             #new_edges = torch.unique(new_edges, dim=1)
             
             eids = g_after.add_edges(new_edges[0], new_edges[1], etype=(src_type, etype, dst_type))
-           # g_after.edges[etype].data["adj"][eids] = counts
+            g_after.edges[etype].data["adj"][eids] = counts
             if src_type == dst_type:
                 g_after = dgl.remove_self_loop(g_after, etype=etype)
         return g_after
@@ -758,7 +759,7 @@ class HeteroCoarsener(GraphSummarizer):
                 merge_list[src_type], src_type, etype,
                 torch.ones(self.coarsened_graph.number_of_nodes(src_type), device=self.device)
             )  # [N_src, hidden]
-            #self.coarsened_graph.edges[etype].data["adj"] = torch.ones(self.coarsened_graph.num_edges(etype=etype))
+            self.coarsened_graph.edges[etype].data["adj"] = torch.ones(self.coarsened_graph.num_edges(etype=etype), device=self.device)
 
             # flatten all (u,v) pairs same as above
             starts, ends = [], []
@@ -865,8 +866,6 @@ class HeteroCoarsener(GraphSummarizer):
                 
                 
             
-                neigbors_u, nodes_u = self.coarsened_graph.in_edges(node1_ids, etype=etype_2)
-                neigbors_v, nodes_v = self.coarsened_graph.in_edges(node2_ids, etype=etype_2)
                 
                 feat1 = self.coarsened_graph.nodes[src_type].data["feat"][node1_ids]
                 feat2 = self.coarsened_graph.nodes[src_type].data["feat"][node2_ids]
@@ -881,9 +880,20 @@ class HeteroCoarsener(GraphSummarizer):
                 
                 
                 
+                
+                
                 neighbors_u_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat1 / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
                 neighbors_v_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat2 / (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
             
+                
+                neigbors_u, nodes_u = self.coarsened_graph.in_edges(node1_ids, etype=etype_2)
+                neigbors_v, nodes_v = self.coarsened_graph.in_edges(node2_ids, etype=etype_2)
+                
+                edge_ids_u = self.coarsened_graph.edge_ids(neigbors_u, nodes_u, etype=etype_2)
+                edge_ids_v = self.coarsened_graph.edge_ids(neigbors_v, nodes_v, etype=etype_2)
+                
+                adj_u = self.coarsened_graph.edges[etype_2].data["adj"][edge_ids_u]
+                adj_v = self.coarsened_graph.edges[etype_2].data["adj"][edge_ids_v]
                 
                 du = self.coarsened_graph.out_degrees(neigbors_u, etype=etype_2 )
                 dv = self.coarsened_graph.out_degrees(neigbors_v, etype=etype_2 )
@@ -891,8 +901,8 @@ class HeteroCoarsener(GraphSummarizer):
                 cu = self.coarsened_graph.nodes[src_type_2].data["node_size"][neigbors_u]
                 cv = self.coarsened_graph.nodes[src_type_2].data["node_size"][neigbors_v]
                 
-                neighbors_u_extra_costs = neighbors_u_extra_costs[nodes_u] / torch.sqrt(du + cu.squeeze())
-                neighbors_v_extra_costs = neighbors_v_extra_costs[nodes_v] / torch.sqrt(dv + cv.squeeze())
+                neighbors_u_extra_costs = neighbors_u_extra_costs[nodes_u] * adj_u/ torch.sqrt(du + cu.squeeze())
+                neighbors_v_extra_costs = neighbors_v_extra_costs[nodes_v] * adj_v / torch.sqrt(dv + cv.squeeze())
                 
                 
                 cost = torch.zeros(node1_ids.shape[0], dtype=torch.float, device=self.device)
