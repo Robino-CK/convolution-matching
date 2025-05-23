@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False, is_eval_metrics=True
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False, is_eval_metrics=False
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -388,7 +388,7 @@ class HeteroCoarsener(GraphSummarizer):
                     continue
                 cu = g.nodes[node_type].data["node_size"][nodes_u]
                 cv = g.nodes[node_type].data["node_size"][nodes_v]
-                suv = g.nodes[node_type].data[f's{etype}'][nodes_u] + g.nodes[node_type].data[f's{etype}'][nodes_v]
+                suv = g.nodes[node_type].data[f's{etype}'][nodes_u]  + g.nodes[node_type].data[f's{etype}'][nodes_v] 
                 cuv = cu + cv
                 g_new.nodes[node_type].data["node_size"][new_nodes] = cuv
                 edges_original = g_new.edges(etype=etype)
@@ -398,8 +398,8 @@ class HeteroCoarsener(GraphSummarizer):
                 edges_dst = repeat_dst == edges_original[0].unsqueeze(0).repeat(repeat_dst.shape[0], 1)
                 
                 edges_src_dst = torch.logical_or(edges_src, edges_dst)
-                #duv = edges_src_dst.sum(dim=1)
-                duv = edges_src.sum(dim=1) + edges_dst.sum(dim=1)
+                duv = edges_src_dst.sum(dim=1)
+                #duv = edges_src.sum(dim=1) + edges_dst.sum(dim=1)
                 
                 infl_u =  g.nodes[node_type].data[f'i{etype}'][nodes_u]
                 infl_v = g.nodes[node_type].data[f'i{etype}'][nodes_v]
@@ -496,7 +496,9 @@ class HeteroCoarsener(GraphSummarizer):
         if self.R:
             costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  * (self.R[ntype])
         else:
-            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
+            costs = self.zscore(torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1) , self.means[ntype] ,self.stds[ntype] ) 
+            
+            #costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
        # print("_update_merge_graph_edge_weigths_features", time.time()- start_time)
         return  costs
     
@@ -601,7 +603,10 @@ class HeteroCoarsener(GraphSummarizer):
             if self.R:
                 total_cost = (cost_src + cost_dst) * (self.R[etype])
             else:
-                total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
+                
+                total_cost = self.zscore((cost_src + cost_dst) , self.means[etype] ,self.stds[etype] ) 
+            
+                #total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
             costs += total_cost       
           #  self._update_merge_graph_edge_weigts_neig_H_approx(costs, src_type, etype, nodes_u_old, nodes_v_old)
             if self.is_neighboring_h:
@@ -955,11 +960,40 @@ class HeteroCoarsener(GraphSummarizer):
                 }
                 
         return costs_dict
+    
+    
+    import torch
+
+    def zscore(self,x: torch.Tensor,mean, std, dim=None,  eps: float = 1e-8) -> torch.Tensor:
+        """
+        Return the z-score–normalised version of `x`.
+
+        Parameters
+        ----------
+        x   : torch.Tensor
+            Input matrix or higher-rank tensor.
+        dim : int | tuple[int] | None, default None
+            Dimension(s) over which to compute mean and std.
+            • None   → use the whole tensor (global z-score)  
+            • 0      → column-wise (each feature independently)  
+            • 1      → row-wise, etc.
+        eps : float, default 1e-8
+            Small constant to avoid division by zero when a std is 0.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of same shape as `x`, standardised so that
+            (approximately) mean = 0 and std = 1 along `dim`.
+        """
+        return (x - mean) / (std + eps)
+
 
     def _add_costs(self, feat_costs, etype_costs, neigbors_costs):
         # normalize and accumulate
         costs_dict, index_dict = {}, {}
-
+        self.means = dict()
+        self.stds = dict()
         # feature costs
         for ntype, cd in feat_costs.items():
             cost = cd["costs"]
@@ -971,7 +1005,11 @@ class HeteroCoarsener(GraphSummarizer):
                 norm = cost * (self.R.get(ntype, R))
             
             else:
-                norm = cost / R
+                
+                self.means[ntype] = cost.mean(dim=None, keepdim=True)
+                self.stds[ntype] = cost.std(dim=None, unbiased=False, keepdim=True) 
+                norm = self.zscore(cost, self.means[ntype] ,self.stds[ntype] ) 
+            
             costs_dict[ntype] = norm
             index_dict[ntype] = cd["index"]
 
@@ -984,8 +1022,12 @@ class HeteroCoarsener(GraphSummarizer):
                 self.minmax_etype[etype] = (mn, mx, R)
                 if self.R:
                     norm = cost * self.R.get(etype, R)
-                else: 
-                    norm = cost / R
+                else:
+                    self.means[etype] = cost.mean(dim=None, keepdim=True)
+                    self.stds[etype] = cost.std(dim=None, unbiased=False, keepdim=True) 
+                    norm = self.zscore(cost, self.means[etype] ,self.stds[etype] ) 
+             
+                    #norm = norm = self.zscore(cost)
                 if src in costs_dict:
                     # broadcast add onto existing vector
                     costs_dict[src] = costs_dict[src] + norm
