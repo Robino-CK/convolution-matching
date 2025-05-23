@@ -31,7 +31,7 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False, is_eval_metrics=True
                  ):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
@@ -50,6 +50,9 @@ class HeteroCoarsener(GraphSummarizer):
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
+        self.is_eval_metrics = is_eval_metrics
+        if self.is_eval_metrics:
+            self.evaluations_distances = []
         self.pca_components = 3
         self.original_graph = original_graph.to(self.device)
         self.dataset = dataset
@@ -318,6 +321,44 @@ class HeteroCoarsener(GraphSummarizer):
             g_new = deepcopy(g)
             nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=self.device)
             nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=self.device)
+            if self.is_eval_metrics:
+                # Step 1: Convert to homogeneous graph (merge all edges into one)
+                homo_g = dgl.to_homogeneous(g)
+
+                # Step 2: Map original node IDs (hetero) to homogeneous node IDs
+                # Get the ID range for 'paper' nodes in the homogeneous graph
+                ntype_ids = homo_g.ndata[dgl.NTYPE]
+                paper_nid = (ntype_ids == g.get_ntype_id(node_type)).nonzero(as_tuple=True)[0]
+
+                # Map paper node indices to homogeneous node IDs
+                node_map = g.nodes(node_type)
+                hetero_to_homo = {int(node_map[i]): int(paper_nid[i]) for i in range(len(node_map))}
+
+                # Map src and dst to homogeneous IDs
+                homo_src = torch.tensor([hetero_to_homo[int(i)] for i in nodes_u])
+                homo_dst = torch.tensor([hetero_to_homo[int(i)] for i in nodes_v])
+
+                # Step 3: Compute shortest distances using BFS from each source
+                def bfs_dist(graph, src, target):
+                    visited = set()
+                    frontier = [src.item()]
+                    distance = 0
+                    while frontier:
+                        if target.item() in frontier:
+                            return distance
+                        next_frontier = []
+                        for u in frontier:
+                            for v in graph.successors(u):
+                                v = int(v)
+                                if v not in visited:
+                                    visited.add(v)
+                                    next_frontier.append(v)
+                        frontier = next_frontier
+                        distance += 1
+                    return -1  # if no path
+
+                # Compute distances for each pair
+                self.evaluations_distances.append([bfs_dist(homo_g, s, t) for s, t in zip(homo_src, homo_dst)])
             mapping = torch.arange(0, g.num_nodes(ntype=node_type), device=self.device )
             num_pairs = len(node_pairs)
             num_nodes_before = g_new.num_nodes(ntype= node_type)
@@ -1037,7 +1078,7 @@ if __name__ == "__main__":
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
-    coarsener =  HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=10, num_nearest_neighbors=30,pairs_per_level=50, is_neighboring_h=True) 
+    coarsener =  HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=10, is_neighboring_h=True) 
     coarsener.init_step()
     for i in range(3):
         print("--------- step: " , i , "---------" )
