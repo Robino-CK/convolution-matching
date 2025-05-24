@@ -31,8 +31,8 @@ CHECKPOINTS = [0.7, 0.5, 0.3, 0.1, 0.05, 0.01, 0.001]
 
 class HeteroCoarsener(GraphSummarizer):
     def __init__(self, dataset: Dataset, original_graph: dgl.DGLGraph, r: float, pairs_per_level: int = 10, 
-                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False, is_eval_metrics=False
-                 ):
+                 num_nearest_neighbors: int = 10, num_nearest_per_etype:int = 10, filename = "dblp", R=None, device=None, is_neighboring_h = False, is_eval_metrics=False,
+                 is_adj=False):
         """
         A graph summarizer that greedily merges neighboring nodes to summarize a graph that yields
         approximately the same graph convolution.
@@ -57,7 +57,7 @@ class HeteroCoarsener(GraphSummarizer):
             self.feat_scores = dict()
             self.edge_distances = dict()
             self.edge_scores = dict()
-            
+        self.is_adj = is_adj
         self.means = dict()
         self.stds = dict()
         
@@ -84,6 +84,8 @@ class HeteroCoarsener(GraphSummarizer):
         self.ntype_distribution = dict()
         for ntype in original_graph.ntypes:
             self.ntype_distribution[ntype] = original_graph.num_nodes(ntype) / total_num_nodes
+            
+        
         
     
     def init_node_info(self):
@@ -95,7 +97,9 @@ class HeteroCoarsener(GraphSummarizer):
             out_deg = self.coarsened_graph.out_degrees(etype=etype)
             # Compute in-degrees for destination nodes of this edge type
             in_deg = self.coarsened_graph.in_degrees(etype=etype)
-
+            # for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
+            #     self.coarsened_graph.edata[f"out_adj_{etype}"] = torch.ones(self.coarsened_graph.add_edges(etype=etype), device=self.device)
+                
             # Store degrees per node per relation
             self.node_degrees[etype] = {
                 'out': out_deg,
@@ -211,14 +215,14 @@ class HeteroCoarsener(GraphSummarizer):
                 self.merge_graphs[ntype].edata["edge_weight"] += score#* d_etype/ d_total
                 
         for ntype in self.coarsened_graph.ntypes:
-                
             if init_costs_dict_etype_neighbors:
-                for etype, costs_edges in init_costs_dict_etype_neighbors[ntype].items():
-                    costs = costs_edges["costs"]
-                    self.merge_graphs[ntype].edata[f"edge_neig_weight_{etype}"] = costs
-                    score = self.zscore(costs, etype , False)
-                    self.merge_graphs[ntype].edata["edge_weight"] += score
-                
+                if ntype in init_costs_dict_etype_neighbors:
+                    for etype, costs_edges in init_costs_dict_etype_neighbors[ntype].items():
+                        costs = costs_edges["costs"]
+                        self.merge_graphs[ntype].edata[f"edge_neig_weight_{etype}"] = costs
+                        score = self.zscore(costs, etype , False)
+                        self.merge_graphs[ntype].edata["edge_weight"] += score
+                    
         
                     
             
@@ -489,11 +493,18 @@ class HeteroCoarsener(GraphSummarizer):
             edges_original = g_before.edges(etype=etype)
             edges_adj = g_before.edges[etype].data["adj"]
             new_edges = torch.stack((mapping_src[edges_original[0]], mapping_dst[edges_original[1]]))
-            new_edges, counts = torch.unique(new_edges, return_counts=True, dim=1)
+            pairs = torch.stack((new_edges[0], new_edges[1]), dim=1)
+
+            uniq_pairs, inverse = torch.unique(
+               pairs, dim=0, return_inverse=True
+                )
+            sums = torch.zeros(len(uniq_pairs), dtype=edges_adj.dtype, device=self.device)
+            sums.index_add_(0, inverse, edges_adj) 
+           # new_edges, counts = torch.unique(new_edges, return_counts=True, dim=1)
             #new_edges = torch.unique(new_edges, dim=1)
             
-            eids = g_after.add_edges(new_edges[0], new_edges[1], etype=(src_type, etype, dst_type))
-            g_after.edges[etype].data["adj"][eids] = counts
+            eids = g_after.add_edges(uniq_pairs[:,0], uniq_pairs[:,1], etype=(src_type, etype, dst_type))
+            g_after.edges[etype].data["adj"][eids] = sums
             if src_type == dst_type:
                 g_after = dgl.remove_self_loop(g_after, etype=etype)
         return g_after
@@ -580,9 +591,15 @@ class HeteroCoarsener(GraphSummarizer):
             
             c1 = self.coarsened_graph.nodes[src_type].data["node_size"][node1_ids]
             c2 = self.coarsened_graph.nodes[src_type].data["node_size"][node2_ids]
-            
-            d1 = self.coarsened_graph.in_degrees(node1_ids,etype=etype_2)
-            d2 = self.coarsened_graph.in_degrees(node2_ids,etype=etype_2)
+            if self.is_adj:
+                deg = self._get_degree_with_adj(node1_ids, [], etype, True)
+                d1 = deg[node1_ids]
+                deg = self._get_degree_with_adj(node2_ids, [], etype, True)
+                d2 = deg[node2_ids]
+            #    d2 = deg[node2_ids]
+            else:
+                d1 = self.coarsened_graph.in_degrees(node1_ids,etype=etype_2)
+                d2 = self.coarsened_graph.in_degrees(node2_ids,etype=etype_2)
             
             feat = (c1 * feat1 + c2 * feat2) / (c1 + c2 )
             
@@ -604,20 +621,37 @@ class HeteroCoarsener(GraphSummarizer):
             
             c1 = self.coarsened_graph.nodes[src_type].data["node_size"][nodes_u_old]
             c2 = self.coarsened_graph.nodes[src_type].data["node_size"][nodes_v_old]
-            
-            d1 = self.coarsened_graph.out_degrees(nodes_u_old,etype=etype)
-            d2 = self.coarsened_graph.out_degrees(nodes_v_old,etype=etype)
+            if self.is_adj:
+                deg = self._get_degree_with_adj(nodes_u_old, nodes_v_old, etype)
+                d1 = deg[nodes_u_old]
+                d2 = deg[nodes_v_old]
+            else:
+                d1 = self.coarsened_graph.out_degrees(nodes_u_old,etype=etype)
+                d2 = self.coarsened_graph.out_degrees(nodes_v_old,etype=etype)
             
             feat = (c1 * feat1 + c2 * feat2) / (c1 + c2 )
             
+            adj = self.coarsened_graph.edges[etype_2].data["adj"]
             
-            
-            neighbors_u_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat1 / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
-            neighbors_v_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat2 / (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
+            neighbors_u_extra_costs = torch.norm( feat * (adj[nodes_u_old]  + adj[nodes_v_old]).unsqueeze(1) / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat1 *  adj[nodes_u_old].unsqueeze(1) / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
+            neighbors_v_extra_costs = torch.norm( feat * (adj[nodes_u_old]  + adj[nodes_v_old]).unsqueeze(1)/ (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat2 * adj[nodes_v_old].unsqueeze(1)/ (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
          
-            
-            du = self.coarsened_graph.out_degrees(neigbors_u, etype=etype_2 )
-            dv = self.coarsened_graph.out_degrees(neigbors_v, etype=etype_2 )
+            if self.is_adj:
+                
+               # edges = self.coarsened_graph.edges(etype=etype_2)
+                du = torch.zeros(neigbors_u.shape[0], device=self.device)
+                du = du.index_add(0, neigbors_u, adj[neigbors_u])
+                
+                dv = torch.zeros(neigbors_v.shape[0], device=self.device)
+                dv = dv.index_add(0, neigbors_v, adj[neigbors_v])
+                
+                # deg_t = self._get_degree_with_adj(neigbors_u, neigbors_v, etype_2)
+                # print(deg_t)
+                # du = deg_t[neigbors_u]
+                # dv = deg_t[neigbors_v]
+            else:
+                du = self.coarsened_graph.out_degrees(neigbors_u, etype=etype_2 )
+                dv = self.coarsened_graph.out_degrees(neigbors_v, etype=etype_2 )
             
             cu = self.coarsened_graph.nodes[src_type_2].data["node_size"][neigbors_u]
             cv = self.coarsened_graph.nodes[src_type_2].data["node_size"][neigbors_v]
@@ -737,7 +771,7 @@ class HeteroCoarsener(GraphSummarizer):
             
             for src_type, etype, dst_type in self.coarsened_graph.canonical_etypes:
                 if src_type == ntype:
-                    d_e = self.coarsened_graph.out_degrees(g_coar.edges()[0], etype=etype)
+                  #  d_e = self.coarsened_graph.out_degrees(g_coar.edges()[0], etype=etype)
                     score =  self.zscore(g_coar.edata[f"edge_weight_{etype}"], etype)
                     if self.is_eval_metrics:
                         self.edge_scores[etype].append( score)
@@ -756,7 +790,36 @@ class HeteroCoarsener(GraphSummarizer):
         else:
             print("_update_merge_graph: WARNING no more merge candidates", time.time()- start_time)    
             return g_coar,  False
-           
+        
+    def _get_degree_with_adj(self, node1s, node2s, etype, is_out=True):
+        required  = torch.cat([node1s, node2s])  # every key that must be present
+
+        # 2) Grab degrees and caches in one go:
+        adj = self.coarsened_graph.edges[etype].data["adj"]
+        edges = self.coarsened_graph.edges(etype=etype)
+        if is_out:
+            edges_src = edges[0]
+        else:
+            edges_src = edges[1]
+        # 1) find which required keys are *not* yet present
+        missing_mask = ~torch.isin(required, edges_src)          # -> tensor([False, False,  True,  True])
+        missing_keys = required[missing_mask]               # -> tensor([2, 3])
+
+        # 2) grow the two tensors
+        
+        aug_keys   = torch.cat((edges_src,   missing_keys))                      # [0, 0, 1, 2, 3]
+        aug_values = torch.cat((adj, torch.zeros_like(missing_keys)))    # [2, 1, 2, 0, 0]
+        
+        
+        uniq, inverse = torch.unique(aug_keys, return_inverse=True, sorted=True)
+        #        uniq = tensor([0, 1])
+        #     inverse = tensor([0, 0, 1])
+
+        # ②  bucket-sum the values with index_add_
+        deg = torch.zeros(len(uniq), dtype=adj.dtype, device=self.device)
+        deg.index_add_(0, inverse, aug_values)
+        return deg
+        
       
     def _create_h_via_cache_vec_fast(self,  table,ntype, etype, cluster_sizes):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
@@ -764,12 +827,17 @@ class HeteroCoarsener(GraphSummarizer):
         # 1) Flatten your table into two 1-D lists of equal length L:
         pairs = [(u, v) for u, vs in table.items() for v in vs]
         node1s, node2s = zip(*pairs)
-        node1s = torch.tensor(node1s, dtype=torch.long)
-        node2s = torch.tensor(node2s, dtype=torch.long)
+        node1s = torch.tensor(node1s, dtype=torch.long, device=self.device)
+        node2s = torch.tensor(node2s, dtype=torch.long, device=self.device)
 
-        # 2) Grab degrees and caches in one go:
-        deg = self.coarsened_graph.out_degrees(etype=etype)
-        deg1 = deg[node1s]            # shape (L,)
+
+        if self.is_adj:
+            deg = self._get_degree_with_adj(node1s, node2s, etype)
+        else:    
+            deg = self.coarsened_graph.out_degrees(etype=etype)
+         
+        
+        deg1 = deg[node1s]  # shape (L,)
         deg2 = deg[node2s]            # shape (L,)
 
         su = cache[node1s]            # shape (L, D)
@@ -790,14 +858,18 @@ class HeteroCoarsener(GraphSummarizer):
         cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
         
         # 1) Flatten your table into two 1-D lists of equal length L:
-        node1s = torch.tensor(node1s, dtype=torch.long)
-        node2s = torch.tensor(node2s, dtype=torch.long)
+        node1s = torch.tensor(node1s, dtype=torch.long, device=self.device)
+        node2s = torch.tensor(node2s, dtype=torch.long, device=self.device)
 
         # 2) Grab degrees and caches in one go:
-        deg = self.coarsened_graph.out_degrees(etype=etype)
-        deg1 = deg[node1s]            # shape (L,)
+        if self.is_adj:
+            deg = self._get_degree_with_adj(node1s, node2s, etype)
+        else:
+            deg = self.coarsened_graph.out_degrees(etype=etype)
+        deg1 = deg[node1s]  # shape (L,)
         deg2 = deg[node2s]            # shape (L,)
 
+        
         su = cache[node1s]            # shape (L, D)
         sv = cache[node2s]            # shape (L, D)
 
@@ -812,42 +884,6 @@ class HeteroCoarsener(GraphSummarizer):
 
         return h_all
     
-    def _create_h_via_cache_vec(self,  table,ntype, etype, cluster_sizes):
-        cache = self.coarsened_graph.nodes[ntype].data[f's{etype}']
-        H_merged = dict()
-        
-        # 1) Flatten your table into two 1-D lists of equal length L:
-        pairs = [(u, v) for u, vs in table.items() for v in vs]
-        node1s, node2s = zip(*pairs)
-        node1s = torch.tensor(node1s, dtype=torch.long)
-        node2s = torch.tensor(node2s, dtype=torch.long)
-
-        # 2) Grab degrees and caches in one go:
-        deg = self.coarsened_graph.out_degrees(etype=etype)
-        deg1 = deg[node1s]            # shape (L,)
-        deg2 = deg[node2s]            # shape (L,)
-
-        su = cache[node1s]            # shape (L, D)
-        sv = cache[node2s]            # shape (L, D)
-
-        # 3) Cluster‐size term (make sure cluster_sizes is a tensor):
-        #csize = torch.tensor([cluster_sizes[i] for i in range(self.coarsened_graph.num_nodes())],
-        #                    device=deg.device, dtype=deg.dtype)
-        cuv = cluster_sizes[node1s] + cluster_sizes[node2s]  # shape (L,)
-
-        # 4) Single vectorized compute of h for all L pairs:
-        #    (we broadcast / unsqueeze cuv into the right D-dimensional form)
-        h_all = (su + sv) / torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1) #)  # (L, D)
-
-        
-        #    and reassign:
-        for pair, h_chunk in zip(pairs, h_all):
-            node1 = pair[0]
-            if node1 not in H_merged:
-                H_merged[node1] = h_chunk.unsqueeze(0)
-            else:
-                H_merged[node1] = torch.cat((H_merged[node1], h_chunk.unsqueeze(0)), dim=0)
-        return H_merged
     
     def _feature_costs(self, merge_list):
         costs_dict = {}
@@ -903,12 +939,13 @@ class HeteroCoarsener(GraphSummarizer):
             # ensure nested dict
             costs_dict.setdefault(src_type, {})[etype] = {}
             # compute all merged h representations in one go
+            self.coarsened_graph.edges[etype].data["adj"] = torch.ones(self.coarsened_graph.num_edges(etype=etype), device=self.device)
+
             H_merged = self._create_h_via_cache_vec_fast(
                 merge_list[src_type], src_type, etype,
                 torch.ones(self.coarsened_graph.number_of_nodes(src_type), device=self.device)
             )  # [N_src, hidden]
-            self.coarsened_graph.edges[etype].data["adj"] = torch.ones(self.coarsened_graph.num_edges(etype=etype), device=self.device)
-
+            
             # flatten all (u,v) pairs same as above
             starts, ends = [], []
             for u, vs in merge_list[src_type].items():
@@ -1345,12 +1382,12 @@ class HeteroCoarsener(GraphSummarizer):
 if __name__ == "__main__":
     tester = TestHetero()
     g = tester.g 
-    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, device="cpu"))
+    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, is_neighboring_h=True, is_adj=True,device="cpu"))
     dataset = DBLP() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
-    coarsener =  HeteroCoarsener(None,original_graph, 0.5, num_nearest_per_etype=3, num_nearest_neighbors=3,pairs_per_level=10, is_neighboring_h=True) 
+    coarsener =  HeteroCoarsener(None,original_graph, 0.1, num_nearest_per_etype=30, num_nearest_neighbors=30,pairs_per_level=10, is_neighboring_h=True, is_adj=True) # 
     coarsener.init_step()
     for i in range(3):
         print("--------- step: " , i , "---------" )
