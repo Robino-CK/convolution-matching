@@ -121,9 +121,10 @@ class HeteroCoarsener(GraphSummarizer):
 
             # Precompute normalized degrees
             deg_out = torch.tensor(self.node_degrees[etype]['out'], device=self.device) + 1.0
-            deg_in  = torch.tensor(self.node_degrees[etype]['in'], device=self.device)  + 1.0
+            #deg_in  = torch.tensor(self.node_degrees[etype]['in'], device=self.device)  + 1.0
             inv_sqrt_out = torch.rsqrt(deg_out)
-            inv_sqrt_in  = torch.rsqrt(deg_in)
+            #inv_sqrt_in  = torch.rsqrt(deg_in)
+            
 
             # Load features or use scalar 1
             if has_feat:
@@ -143,13 +144,15 @@ class HeteroCoarsener(GraphSummarizer):
                 feat_v = feats[v]                              # [E, D]
             else:
                 feat_v = torch.ones((v.shape[0], 1), device=self.device)
-            s_e = feat_v * inv_sqrt_in[v].unsqueeze(-1)       # [E, D]
+                
+            
+            s_e = feat_v * inv_sqrt_out[v].unsqueeze(-1)       # [E, D]
             # Scatter-add to compute S at source nodes
             n_src = g.num_nodes(src_type)
             S_tensor = torch.zeros((n_src, feat_dim), device=self.device)
             S_tensor = S_tensor.index_add(0, u, s_e)
             infl = torch.zeros(n_src, device=self.device)
-            infl = infl.index_add(0, u, inv_sqrt_in[v])
+            infl = infl.index_add(0, u, inv_sqrt_out[v])
 
             # Compute H = D_out^{-1/2} * S
             H_tensor = inv_sqrt_out.unsqueeze(-1) * S_tensor
@@ -158,7 +161,9 @@ class HeteroCoarsener(GraphSummarizer):
             self.coarsened_graph.nodes[src_type].data[f'i{etype}'] = infl
             
             self.coarsened_graph.nodes[src_type].data[f's{etype}'] = S_tensor
-            self.coarsened_graph.nodes[src_type].data[f'h{etype}'] = H_tensor
+            #print( ((1 / (deg_out.unsqueeze(-1))) * feats).shape)
+            print(H_tensor.shape)
+            self.coarsened_graph.nodes[src_type].data[f'h{etype}'] = H_tensor + ((feats / (deg_out.unsqueeze(-1))))
             self.coarsened_graph.nodes[src_type].data['node_size']  = torch.ones((n_src, 1), device=self.device)
 
         print("_create_h_spatial_rgcn", time.time() - start_time)
@@ -445,12 +450,31 @@ class HeteroCoarsener(GraphSummarizer):
                 infl_v = g.nodes[node_type].data[f'i{etype}'][nodes_v]
                 
                 infl_uv = (infl_u  * cu.squeeze() + infl_v * cv.squeeze()) / cuv.squeeze()# - (1 / torch.sqrt(edges_v.sum(dim=1) +  cv.squeeze()))
-            
+                exists = g.has_edges_between(nodes_u, nodes_v, etype=etype)
+                adj = torch.zeros(len(nodes_u), device=self.device)
+                                # Get indices where the edge exists
+                existing_edge_indices = exists.nonzero(as_tuple=True)[0]
+
+
+                # Get edge IDs for the existing edges
+                edge_ids = g.edge_ids(nodes_u[existing_edge_indices], nodes_v[existing_edge_indices], etype=etype)
                 #g_new.nodes[node_type].data[f'i{etype}'][new_nodes] =   infl_uv
+            
+                edge_data = g.edges[etype].data['adj'][edge_ids]
+
+                # Assign edge data to the result tensor
+                adj[existing_edge_indices] = edge_data
+            
+                du = edges_src.sum(dim=1)
+                dv = edges_dst.sum(dim=1)
                 
-                g_new.nodes[node_type].data[f's{etype}'][new_nodes] = suv  
+                minus = torch.mul((adj / torch.sqrt(du + cu.squeeze() )).unsqueeze(1), feat_u) + torch.mul((adj / torch.sqrt(dv + cv.squeeze() )).unsqueeze(1), feat_v) # + torch.matmul( (adj / torch.sqrt(deg2 + cv.squeeze() )), feat_v)
+        
                 
-                g_new.nodes[node_type].data[f'h{etype}'][new_nodes] =  suv * cuv / torch.sqrt(duv.unsqueeze(1) + cuv)
+                g_new.nodes[node_type].data[f's{etype}'][new_nodes] = suv  - minus
+                
+                
+                g_new.nodes[node_type].data[f'h{etype}'][new_nodes] =  (suv  - minus)  / torch.sqrt(duv.unsqueeze(1) + cuv) + ((feat_u * cu  + feat_v * cv ) /   (duv.unsqueeze(1) + cuv)) 
             nodes_to_delete = torch.cat([nodes_u, nodes_v])           
             g_new.remove_nodes(nodes_to_delete, ntype=node_type)
                 
@@ -717,7 +741,7 @@ class HeteroCoarsener(GraphSummarizer):
         if len(self.edge_ids_need_recalc) > 0:    
             
             
-            self.costs_features = self._update_merge_graph_edge_weigths_features(g_coar,ntype, self.edge_ids_need_recalc)
+            self.costs_features = dict()#self._update_merge_graph_edge_weigths_features(g_coar,ntype, self.edge_ids_need_recalc)
             
             self.costs_H = self._update_merge_graph_edge_weights_H(g_coar, ntype, self.edge_ids_need_recalc)
             
@@ -763,15 +787,23 @@ class HeteroCoarsener(GraphSummarizer):
             return g_coar,  False
         
     def _get_degree_with_adj(self, node1s, node2s, etype, is_out=True):
-        required  = torch.cat([node1s, node2s])  # every key that must be present
+        if node2s == None:
+            required = node1s
+        else:
+            required  = torch.cat([node1s, node2s])  # every key that must be present
 
         # 2) Grab degrees and caches in one go:
         adj = self.coarsened_graph.edges[etype].data["adj"]
         edges = self.coarsened_graph.edges(etype=etype)
+        
+        deg = torch.zeros(len(adj), dtype=adj.dtype, device=self.device)
         if is_out:
             edges_src = edges[0]
         else:
             edges_src = edges[1]
+        
+        deg.index_add_(0, edges_src, adj)
+        return deg
         # 1) find which required keys are *not* yet present
         missing_mask = ~torch.isin(required, edges_src)          # -> tensor([False, False,  True,  True])
         missing_keys = required[missing_mask]               # -> tensor([2, 3])
@@ -789,6 +821,8 @@ class HeteroCoarsener(GraphSummarizer):
         # ②  bucket-sum the values with index_add_
         deg = torch.zeros(len(uniq), dtype=adj.dtype, device=self.device)
         deg.index_add_(0, inverse, aug_values)
+        
+        
         return deg
         
       
@@ -813,6 +847,21 @@ class HeteroCoarsener(GraphSummarizer):
 
         su = cache[node1s]            # shape (L, D)
         sv = cache[node2s]            # shape (L, D)
+        
+        adj1 = self._get_adj(node1s, node2s, etype)
+        adj2 = self._get_adj(node2s, node1s, etype)
+        
+        
+        
+        feat_u = self.coarsened_graph.nodes[ntype].data["feat"][node1s]
+        feat_v = self.coarsened_graph.nodes[ntype].data["feat"][node2s]
+        
+        
+        cu = cluster_sizes[node1s]
+        cv = cluster_sizes[node2s]
+        minus = torch.mul((adj2 / torch.sqrt(deg1 + cu.squeeze() )).unsqueeze(1), feat_u) + torch.mul((adj1 / torch.sqrt(deg2 + cv.squeeze() )).unsqueeze(1), feat_v) # + torch.matmul( (adj / torch.sqrt(deg2 + cv.squeeze() )), feat_v)
+        #minus = feat_u*(g.edges[etype].data["adj"] [repeat_src] / torch.sqrt(du.unsqueeze(1) + cu ))  +  g.etype[etype].data["adj"] [repeat_dst] / torch.sqrt(dv + cv ) * feat_v
+        
 
         # 3) Cluster‐size term (make sure cluster_sizes is a tensor):
         #csize = torch.tensor([cluster_sizes[i] for i in range(self.coarsened_graph.num_nodes())],
@@ -821,7 +870,9 @@ class HeteroCoarsener(GraphSummarizer):
 
         # 4) Single vectorized compute of h for all L pairs:
         #    (we broadcast / unsqueeze cuv into the right D-dimensional form)
-        h_all = (su + sv) / torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1) #)  # (L, D)
+        
+        feat = (feat_u*cu.unsqueeze(1) + feat_v*cv.unsqueeze(1)) / (cu.unsqueeze(1) + cv.unsqueeze(1))
+        h_all = ((su + sv) - minus )/ torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1 ) + feat * ( cuv / ((deg1 + deg2 + cuv.squeeze()))).unsqueeze(1)  #+   #)  # (L, D)
 
         return h_all
    
@@ -842,7 +893,20 @@ class HeteroCoarsener(GraphSummarizer):
 
         
         su = cache[node1s]            # shape (L, D)
-        sv = cache[node2s]            # shape (L, D)
+        sv = cache[node2s]
+        
+        adj1 = self._get_adj(node1s, node2s, etype)
+        adj2 = self._get_adj(node2s, node1s, etype)
+        
+        feat_u = self.coarsened_graph.nodes[ntype].data["feat"][node1s]
+        feat_v = self.coarsened_graph.nodes[ntype].data["feat"][node2s]
+        
+        
+        cu = cluster_sizes[node1s]
+        cv = cluster_sizes[node2s]
+        minus = torch.mul((adj2 / torch.sqrt(deg1 + cu.squeeze() )).unsqueeze(1), feat_u) + torch.mul((adj1 / torch.sqrt(deg2 + cv.squeeze() )).unsqueeze(1), feat_v) # + torch.matmul( (adj / torch.sqrt(deg2 + cv.squeeze() )), feat_v)
+        #minus = feat_u*(g.edges[etype].data["adj"] [repeat_src] / torch.sqrt(du.unsqueeze(1) + cu ))  +  g.etype[etype].data["adj"] [repeat_dst] / torch.sqrt(dv + cv ) * feat_v
+        
 
         # 3) Cluster‐size term (make sure cluster_sizes is a tensor):
         #csize = torch.tensor([cluster_sizes[i] for i in range(self.coarsened_graph.num_nodes())],
@@ -851,9 +915,29 @@ class HeteroCoarsener(GraphSummarizer):
 
         # 4) Single vectorized compute of h for all L pairs:
         #    (we broadcast / unsqueeze cuv into the right D-dimensional form)
-        h_all = (su + sv) / torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1) #)  # (L, D)
+        feat = (feat_u*cu + feat_v*cv) / (cu + cv)
+        h_all = ((su + sv) - minus )/ torch.sqrt((deg1 + deg2 + cuv.squeeze())).unsqueeze(1 ) + feat * ( cuv.squeeze() / ((deg1 + deg2 + cuv.squeeze()))).unsqueeze(1)  #+   #)  # (L, D)
 
         return h_all
+    
+    def _get_adj(self, nodes_u, nodes_v, etype):
+        exists = self.coarsened_graph.has_edges_between(nodes_u, nodes_v, etype=etype)
+        adj = torch.zeros(len(nodes_u), device=self.device)
+        
+                       # Get indices where the edge exists
+        existing_edge_indices = exists.nonzero(as_tuple=True)[0]
+
+
+        # Get edge IDs for the existing edges
+        edge_ids = self.coarsened_graph.edge_ids(nodes_u[existing_edge_indices], nodes_v[existing_edge_indices], etype=etype)
+        #g_new.nodes[node_type].data[f'i{etype}'][new_nodes] =   infl_uv
+    
+        edge_data = self.coarsened_graph.edges[etype].data['adj'][edge_ids]
+
+        # Assign edge data to the result tensor
+        adj[existing_edge_indices] = edge_data
+        return adj
+    
     
     
     def _feature_costs(self, merge_list):
@@ -1025,8 +1109,8 @@ class HeteroCoarsener(GraphSummarizer):
                 
             
                 
-                feat1 = self.coarsened_graph.nodes[src_type].data["feat"][node1_ids]
-                feat2 = self.coarsened_graph.nodes[src_type].data["feat"][node2_ids]
+                feat_u = self.coarsened_graph.nodes[src_type].data["feat"][node1_ids]
+                feat_v = self.coarsened_graph.nodes[src_type].data["feat"][node2_ids]
                 
                 c1 = self.coarsened_graph.nodes[src_type].data["node_size"][node1_ids]
                 c2 = self.coarsened_graph.nodes[src_type].data["node_size"][node2_ids]
@@ -1034,19 +1118,46 @@ class HeteroCoarsener(GraphSummarizer):
                 d1 = self.coarsened_graph.out_degrees(node1_ids,etype=etype)
                 d2 = self.coarsened_graph.out_degrees(node2_ids,etype=etype)
                 
-                feat = (c1 * feat1 + c2 * feat2) / (c1 + c2 )
+                feat_uv = (c1 * feat_u + c2 * feat_v) / (c1 + c2 )
                 
                 
                 
                 
-                
-                neighbors_u_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat1 / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
-                neighbors_v_extra_costs = torch.norm( feat / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat2 / (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
+                # neighbors_u_extra_costs = torch.norm( feat_uv / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat_u / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
+                # neighbors_v_extra_costs = torch.norm( feat_uv / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat_v / (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
             
                 
-                neigbors_u, nodes_u = self.coarsened_graph.in_edges(node1_ids, etype=etype_2)
-                neigbors_v, nodes_v = self.coarsened_graph.in_edges(node2_ids, etype=etype_2)
+                neigbors_u, nodes_u = self.coarsened_graph.out_edges(node1_ids, etype=etype_2)
+                neigbors_v, nodes_v = self.coarsened_graph.out_edges(node2_ids, etype=etype_2)
                 
+                nodes_uv = torch.cat([nodes_u, nodes_v])
+                neighbors = torch.cat([neigbors_u, neigbors_v])
+                hi_neigh = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][neighbors] # TODO etype?
+                
+                feat_neigh = self.coarsened_graph.nodes[src_type].data[f'feat'][neighbors]
+                
+                c_uv =   self.coarsened_graph.nodes[src_type].data[f'node_size'][nodes_uv]
+                c_neigh = self.coarsened_graph.nodes[src_type].data[f'node_size'][neighbors]
+                 
+                adj1_nei_u = self._get_adj(neigbors_u, nodes_u, etype)
+                adj1_nei_v = self._get_adj(neigbors_v, nodes_v, etype)
+        
+                adj1_u_nei = self._get_adj(nodes_u, neigbors_u, etype)
+                adj1_v_nei = self._get_adj(nodes_v, neigbors_v, etype)
+        
+
+                
+                s_neigh = self.coarsened_graph.nodes[src_type].data[f"s{etype}"][neighbors]
+                
+                d_neigh = self._get_degree_with_adj(neighbors, None,etype )
+                deg_u = self._get_degree_with_adj(nodes_u, None,etype )
+                deg_v = self._get_degree_with_adj(nodes_v, None,etype )
+               # d_v = self._get_degree_with_adj(nodes_v, None,etype )
+                
+                h_u_prim = c_neigh / (d_neigh[neighbors].unsqueeze(1) + c_neigh )  * feat_neigh
+                h_u_prim += 1 / (torch.sqrt(d_neigh[neighbors]).unsqueeze(1) )*s_neigh
+                h_u_prim += (adj1_nei_u[neighbors] + adj1_nei_v[neighbors]) / torch.sqrt(((d_neigh[neighbors].unsqueeze(1) + c_neigh[neighbors]).squeeze() * ( deg_u[nodes_uv].unsqueeze(1) + deg_v[nodes_uv].unsqueeze(1)  + c_uv[nodes_uv] + c_uv[nodes_uv]).squeeze() ) )
+                h_u_prim -= adj1_u_nei[neighbors] / torch.sqrt(1)                 
                 edge_ids_u = self.coarsened_graph.edge_ids(neigbors_u, nodes_u, etype=etype_2)
                 edge_ids_v = self.coarsened_graph.edge_ids(neigbors_v, nodes_v, etype=etype_2)
                 
@@ -1139,7 +1250,7 @@ class HeteroCoarsener(GraphSummarizer):
         start_time = time.time()
         
 
-        self.init_costs_dict_features = self._feature_costs( merge_list)
+        self.init_costs_dict_features = dict()  # self._feature_costs( merge_list)
         
         self.init_costs_dict_etype = self._h_costs( merge_list)    
        # self.init_something = self._approx_neighbors_h_costs(merge_list)
@@ -1281,10 +1392,10 @@ class HeteroCoarsener(GraphSummarizer):
 
 
 if __name__ == "__main__":
-    tester = TestHetero()
+    tester = TestHomo()
     g = tester.g 
     tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, is_neighboring_h=True, is_adj=True,device="cpu"))
-    dataset = DBLP() 
+    dataset = Citeseer() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
