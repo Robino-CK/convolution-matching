@@ -450,7 +450,7 @@ class HeteroCoarsener(GraphSummarizer):
                 
                 g_new.nodes[node_type].data[f's{etype}'][new_nodes] = suv  
                 
-                g_new.nodes[node_type].data[f'h{etype}'][new_nodes] =  suv / torch.sqrt(duv.unsqueeze(1) + cuv)
+                g_new.nodes[node_type].data[f'h{etype}'][new_nodes] =  suv * cuv / torch.sqrt(duv.unsqueeze(1) + cuv)
             nodes_to_delete = torch.cat([nodes_u, nodes_v])           
             g_new.remove_nodes(nodes_to_delete, ntype=node_type)
                 
