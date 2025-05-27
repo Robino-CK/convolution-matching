@@ -189,6 +189,8 @@ class HeteroCoarsener(GraphSummarizer):
                 self.merge_graphs[ntype].edata["edge_weight_feat"] = costs 
                 edges_add = True
                 score = self.zscore(costs, ntype )
+                if self.R:
+                    score = score * self.R[ntype]
                 if self.is_eval_metrics:
                     self.feat_scores[ntype] = []
                     self.feat_scores[ntype].append(score)
@@ -209,6 +211,8 @@ class HeteroCoarsener(GraphSummarizer):
                 costs = costs_edges["costs"] 
                 self.merge_graphs[ntype].edata[f"edge_weight_{etype}"] = costs
                 score = self.zscore(costs, etype )
+                if self.R:
+                    score = score * self.R[etype]
                 if self.is_eval_metrics:
                     self.edge_scores[etype] = []
                     self.edge_scores[etype].append(score)
@@ -221,6 +225,8 @@ class HeteroCoarsener(GraphSummarizer):
                         costs = costs_edges["costs"]
                         self.merge_graphs[ntype].edata[f"edge_neig_weight_{etype}"] = costs
                         score = self.zscore(costs, etype , False)
+                        if self.R:
+                            score = score * self.R[etype]
                         self.merge_graphs[ntype].edata["edge_weight"] += score
                     
         
@@ -388,44 +394,11 @@ class HeteroCoarsener(GraphSummarizer):
             g_new = deepcopy(g)
             nodes_u = torch.tensor([i for i, _ in node_pairs], dtype=torch.int64, device=self.device)
             nodes_v = torch.tensor([i for  _,i in node_pairs], dtype=torch.int64, device=self.device)
-            if self.is_eval_metrics:
+        #    if self.is_eval_metrics and False:
                 # Step 1: Convert to homogeneous graph (merge all edges into one)
-                homo_g = dgl.to_homogeneous(g)
-
-                # Step 2: Map original node IDs (hetero) to homogeneous node IDs
-                # Get the ID range for 'paper' nodes in the homogeneous graph
-                ntype_ids = homo_g.ndata[dgl.NTYPE]
-                paper_nid = (ntype_ids == g.get_ntype_id(node_type)).nonzero(as_tuple=True)[0]
-
-                # Map paper node indices to homogeneous node IDs
-                node_map = g.nodes(node_type)
-                hetero_to_homo = {int(node_map[i]): int(paper_nid[i]) for i in range(len(node_map))}
-
-                # Map src and dst to homogeneous IDs
-                homo_src = torch.tensor([hetero_to_homo[int(i)] for i in nodes_u])
-                homo_dst = torch.tensor([hetero_to_homo[int(i)] for i in nodes_v])
-
-                # Step 3: Compute shortest distances using BFS from each source
-                def bfs_dist(graph, src, target):
-                    visited = set()
-                    frontier = [src.item()]
-                    distance = 0
-                    while frontier:
-                        if target.item() in frontier:
-                            return distance
-                        next_frontier = []
-                        for u in frontier:
-                            for v in graph.successors(u):
-                                v = int(v)
-                                if v not in visited:
-                                    visited.add(v)
-                                    next_frontier.append(v)
-                        frontier = next_frontier
-                        distance += 1
-                    return -1  # if no path
-
+                
                 # Compute distances for each pair
-             #   self.evaluations_distances.append([bfs_dist(homo_g, s, t) for s, t in zip(homo_src, homo_dst)])
+             #   
             mapping = torch.arange(0, g.num_nodes(ntype=node_type), device=self.device )
             num_pairs = len(node_pairs)
             num_nodes_before = g_new.num_nodes(ntype= node_type)
@@ -567,14 +540,12 @@ class HeteroCoarsener(GraphSummarizer):
         cv = self.coarsened_graph.nodes[ntype].data["node_size"][nodes_v]        
        # g.edata[]
         mid = (f1* cu + f2* cv) / (cu + cv)   # [E'×H]
-        if self.R:
-            costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  * (self.R[ntype])
-        else:
-            costs =  torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1) 
-            g.edata["edge_weight_feat"][eids] =  costs
-            if self.is_eval_metrics:
-                self.feat_distances[ntype].append( costs)
-            costs =  torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1) 
+        
+        costs =  torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1) 
+        g.edata["edge_weight_feat"][eids] =  costs
+        if self.is_eval_metrics:
+            self.feat_distances[ntype].append( costs)
+        costs =  torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1) 
             
             #costs = (torch.norm(mid - f1,  dim=1, p =1) + torch.norm(mid - f2,  dim=1, p=1))  / (self.minmax_ntype[ntype][2])  # [E']
        # print("_update_merge_graph_edge_weigths_features", time.time()- start_time)
@@ -659,14 +630,10 @@ class HeteroCoarsener(GraphSummarizer):
             neighbors_u_extra_costs = neighbors_u_extra_costs[nodes_u] / torch.sqrt(du + cu.squeeze())
             neighbors_v_extra_costs = neighbors_v_extra_costs[nodes_v] / torch.sqrt(dv + cv.squeeze())
             
-            if self.R:
-                neighbors_u_extra_costs = neighbors_u_extra_costs  * (self.R[etype_2])
-                neigbhors_v_extra_costs = neigbhors_v_extra_costs   * (self.R[etype_2])
-            else:
-                
-                neighbors_u_extra_costs = neighbors_u_extra_costs    
-                neighbors_v_extra_costs = neighbors_v_extra_costs  
-                #   total_cost = (cost_src + cost_dst) / 
+            
+            neighbors_u_extra_costs = neighbors_u_extra_costs    
+            neighbors_v_extra_costs = neighbors_v_extra_costs  
+            #   total_cost = (cost_src + cost_dst) / 
             
             costs.index_add_(0, nodes_u, neighbors_u_extra_costs)
             costs.index_add_(0, nodes_v, neighbors_v_extra_costs)
@@ -700,15 +667,13 @@ class HeteroCoarsener(GraphSummarizer):
 
             cost_src =torch.norm(repr_u - merged_repr,  dim=1, p=1)  # [E]
             cost_dst = torch.norm(repr_v - merged_repr,  dim=1, p=1)  # [E]
-            if self.R:
-                total_cost = (cost_src + cost_dst) * (self.R[etype])
-            else:
+            
                 
              #   total_cost = self.zscore((cost_src + cost_dst) , self.means[etype] ,self.stds[etype] ) 
-                costs =  cost_src + cost_dst 
-                if self.is_eval_metrics:
-                    self.edge_distances[etype].append( costs)
-                g.edata[f"edge_weight_{etype}"][eids] = costs
+            costs =  cost_src + cost_dst 
+            if self.is_eval_metrics:
+                self.edge_distances[etype].append( costs)
+            g.edata[f"edge_weight_{etype}"][eids] = costs
                 #total_cost = (cost_src + cost_dst) / (self.minmax_etype[etype][2])               # [E]
            # costs += total_cost       
           #  self._update_merge_graph_edge_weigts_neig_H_approx(costs, src_type, etype, nodes_u_old, nodes_v_old)
@@ -763,6 +728,8 @@ class HeteroCoarsener(GraphSummarizer):
                 
             if "edge_weight_feat" in g_coar.edata:
                 score = self.zscore(g_coar.edata["edge_weight_feat"], ntype)
+                if self.R:
+                    score = score * self.R[ntype]
                 if self.is_eval_metrics:
                     self.feat_scores[ntype].append(score)
                 g_coar.edata["edge_weight"] = score
@@ -773,6 +740,8 @@ class HeteroCoarsener(GraphSummarizer):
                 if src_type == ntype:
                   #  d_e = self.coarsened_graph.out_degrees(g_coar.edges()[0], etype=etype)
                     score =  self.zscore(g_coar.edata[f"edge_weight_{etype}"], etype)
+                    if self.R:
+                        score = score * self.R[etype]
                     if self.is_eval_metrics:
                         self.edge_scores[etype].append( score)
                     g_coar.edata["edge_weight"] += score# * d_e / d_total
@@ -781,6 +750,8 @@ class HeteroCoarsener(GraphSummarizer):
                             if src_type != dst_type_2:
                                 continue
                             score =  self.zscore(g_coar.edata[f"edge_neig_weight_{etype_2}"], etype_2, False)
+                            if self.R:
+                                score = score * self.R[etype]
                             g_coar.edata["edge_weight"] += score
                         
             #g_coar.edata["edge_weight"][self.edge_ids_need_recalc] = self.costs_features 
@@ -1162,77 +1133,7 @@ class HeteroCoarsener(GraphSummarizer):
         x_std = (x - xmin) / (xmax - xmin + eps)
         return x_std * (xmax - xmax) + xmin
 
-    def _add_costs(self, feat_costs, etype_costs, neigbors_costs):
-        # normalize and accumulate
-        costs_dict, index_dict = {}, {}
-        self.means = dict()
-        self.stds = dict()
-        # feature costs
-        for ntype, cd in feat_costs.items():
-            cost = cd["costs"]
-            mn, mx = cost.min(), cost.max()
-            R = mx - mn + 1e-13
-            self.minmax_ntype[ntype] = (mn, mx, R)
-            if self.R:
-                
-                norm = cost * (self.R.get(ntype, R))
-            
-            else:
-                
-                self.means[ntype] = cost.mean(dim=None, keepdim=True)
-                self.stds[ntype] = cost.std(dim=None, unbiased=False, keepdim=True) 
-                #norm = self.zscore(cost, self.means[ntype] ,self.stds[ntype] ) 
-                norm = cost
-            costs_dict[ntype] = norm
-            index_dict[ntype] = cd["index"]
 
-        # etype costs
-        for src, etypes in etype_costs.items():
-            for etype, cd in etypes.items():
-                cost = cd["costs"]
-                mn, mx = cost.min(), cost.max()
-                R = mx - mn + 1e-13
-                self.minmax_etype[etype] = (mn, mx, R)
-                if self.R:
-                    norm = cost * self.R.get(etype, R)
-                else:
-                    self.means[etype] = cost.mean(dim=None, keepdim=True)
-                    self.stds[etype] = cost.std(dim=None, unbiased=False, keepdim=True) 
-                    #norm = self.zscore(cost, self.means[etype] ,self.stds[etype] ) 
-                    norm = cost
-                    #norm = norm = self.zscore(cost)
-                if src in costs_dict:
-                    # broadcast add onto existing vector
-                    costs_dict[src] = costs_dict[src] + norm
-                    # indices must match
-                    assert torch.equal(index_dict[src], cd["index"])
-                else:
-                    costs_dict[src] = norm
-                    index_dict[src] = cd["index"]
-        if neigbors_costs == None:
-            return costs_dict, index_dict
-        
-        
-                        
-        for src, etypes in neigbors_costs.items():
-            for etype2, cd in etypes.items():
-                #for etype2, cd in cd_wtf.items():
-                cost = cd["costs"]
-                R = self.minmax_etype[etype2][2]
-                if self.R:
-                    norm = cost * self.R.get(etype2, R)
-                else: 
-                    norm = cost / R
-                if src in costs_dict:
-                    # broadcast add onto existing vector
-                    costs_dict[src] = costs_dict[src] + norm
-                    # indices must match
-                    assert torch.equal(index_dict[src], cd["index"])
-                else:
-                    costs_dict[src] = norm
-                    index_dict[src] = cd["index"]
-
-        return costs_dict, index_dict
                     
     def _costs_of_merges(self, merge_list):
         start_time = time.time()
