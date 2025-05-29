@@ -1,6 +1,7 @@
 import copy
 import dgl
 import numpy as np
+from tqdm import tqdm    
 import os
 import sys
 import math
@@ -46,7 +47,7 @@ class HeteroCoarsener(GraphSummarizer):
         if device:
             self.device = device
         else: 
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
         self.filename = filename
         assert (r > 0.0) and (r <= 1.0)
         self.r = r
@@ -448,8 +449,11 @@ class HeteroCoarsener(GraphSummarizer):
                 
                 infl_u =  g.nodes[node_type].data[f'i{etype}'][nodes_u]
                 infl_v = g.nodes[node_type].data[f'i{etype}'][nodes_v]
-                
-                infl_uv = (infl_u  * cu.squeeze() + infl_v * cv.squeeze()) / cuv.squeeze()# - (1 / torch.sqrt(edges_v.sum(dim=1) +  cv.squeeze()))
+                adj_u = self._get_adj(nodes_u, nodes_v,etype)
+                adj_v = self._get_adj(nodes_v, nodes_u,etype)
+                deg = self._get_degree_with_adj(nodes_u, nodes_v, etype)
+                infl_uv =   infl_u - (adj_u / torch.sqrt(cv.squeeze() + deg[nodes_v])) + infl_v -  (adj_v / torch.sqrt(cu.squeeze() + deg[nodes_u])) 
+                #infl_uv = (infl_u  * cu.squeeze() + infl_v * cv.squeeze()) / cuv.squeeze()# - (1 / torch.sqrt(edges_v.sum(dim=1) +  cv.squeeze()))
                 exists = g.has_edges_between(nodes_u, nodes_v, etype=etype)
                 adj = torch.zeros(len(nodes_u), device=self.device)
                                 # Get indices where the edge exists
@@ -458,8 +462,66 @@ class HeteroCoarsener(GraphSummarizer):
 
                 # Get edge IDs for the existing edges
                 edge_ids = g.edge_ids(nodes_u[existing_edge_indices], nodes_v[existing_edge_indices], etype=etype)
-                #g_new.nodes[node_type].data[f'i{etype}'][new_nodes] =   infl_uv
-            
+                g_new.nodes[node_type].data[f'i{etype}'][new_nodes] =   infl_uv
+                
+                neighbors, nodes, eids = self.coarsened_graph.in_edges( torch.cat((nodes_v, nodes_u)) ,form="all", etype=etype)
+                
+                unique_nodes, inverse_indices = torch.unique(nodes, return_inverse=True)
+                
+                pos_v = torch.searchsorted(unique_nodes, nodes_v)
+                pos_u = torch.searchsorted(unique_nodes, nodes_u)
+
+                # Create boolean masks for each original node set
+                mask_v = (inverse_indices.unsqueeze(0) == pos_v.unsqueeze(1))
+                mask_u = (inverse_indices.unsqueeze(0) == pos_u.unsqueeze(1))
+
+                # Get indices where each node appears
+                indices_v = torch.where(mask_v)  # (node_idx, position_in_nodes)
+                indices_u = torch.where(mask_u)  # (node_idx, position_in_nodes)
+          #      neighbors = torch.cat(neighbors_v, neighbors_u)
+                #g_new.edges[etype].data['adj'][eid_v]
+                pairs = torch.stack([neighbors, nodes], dim=1)
+                unique_edges, inverse_edges = torch.unique(pairs, return_inverse=True, dim=0)
+                
+                #unique_uv, inverse_uv = torch.unique(torch.cat((neighbors_u, neighbors_v)), return_inverse=True)
+                
+                adj = self._get_adj(neighbors, nodes,etype)
+                unique_neigbors, inverse_neigbors = torch.unique(neighbors, return_inverse=True)
+                
+                c = g.nodes[node_type].data["node_size"][nodes]
+             
+                mask_n_u = torch.isin(nodes, nodes_u)
+                adj_u = adj[mask_n_u]
+                deg_u = deg[nodes[mask_n_u]]
+                c_u = c[mask_n_u]
+                new_neighbors_infl = torch.zeros(len(neighbors), device = self.device)#torch.zeros(len(unique_neigbors), device=self.device )
+                term_u = - (adj_u / torch.sqrt(deg_u + c_u.squeeze()))
+                new_neighbors_infl[mask_n_u] += term_u
+                
+                mask_n_v = torch.isin(nodes, nodes_v)
+                adj_v = adj[mask_n_v]
+                deg_v = deg[nodes[mask_n_v]]
+                c_v = c[mask_n_v]
+                term_v = - (adj_v / torch.sqrt(deg_v + c_v.squeeze()))
+                new_neighbors_infl[mask_n_v] += term_v
+                
+                uni_neighbors_influence = g_new.nodes[node_type].data[f'i{etype}'][unique_neigbors]
+                uni_neighbors_influence = uni_neighbors_influence.index_add(0, inverse_neigbors, new_neighbors_infl)
+                
+                
+                cuv = g.nodes[node_type].data["node_size"][nodes_u].squeeze() + g.nodes[node_type].data["node_size"][nodes_v].squeeze()
+                deguv = deg[nodes_u] + deg[nodes_v]
+                
+                mask_u = torch.isin(nodes_u, nodes)
+                mask_v = torch.isin(nodes_v, nodes)
+                
+                adj = g.edges[etype].data['adj'][eids]
+                nodes
+                
+                
+                
+                term_uv =  (adj / torch.sqrt(deg[nodes_u] + deg[nodes_v] + c.squeeze()))
+                uni_neighbors_influence = uni_neighbors_influence.index_add(0, inverse_neigbors, term_uv)
                 edge_data = g.edges[etype].data['adj'][edge_ids]
 
                 # Assign edge data to the result tensor
@@ -1077,9 +1139,246 @@ class HeteroCoarsener(GraphSummarizer):
                 "index": torch.stack([node1_ids, node2_ids], dim=0)
                 }
         return costs_dict
+    
                 
+    def neighbors_very_expensive(self, node1_ids, node2_ids, etype, etype_2, src_type):
+             #   costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
+        pairs = torch.stack((node1_ids, node2_ids), dim=1)
+        costs_array = []
+        for p1, p2 in pairs:
+            neighbors,nodes  = self.coarsened_graph.in_edges(torch.tensor((p1,p2), device=self.device), etype=etype_2)
+            mask1 = neighbors != p1
+            mask2 = neighbors != p2
+            mask = torch.logical_and(mask1, mask2)
+            neighbors = neighbors[mask]
+            cp1 = self.coarsened_graph.nodes[src_type].data["node_size"][p1]
+            cp2 = self.coarsened_graph.nodes[src_type].data["node_size"][p2]
+            feat_1 = self.coarsened_graph.nodes[src_type].data["feat"][p1]
+            feat_2 = self.coarsened_graph.nodes[src_type].data["feat"][p2]
+            d1 = self._get_degree_with_adj(p1, None,etype )[p1]
+            d2 = self._get_degree_with_adj(p2, None,etype )[p2]
+            feat_p = (cp1 * feat_1 + cp2 * feat_2) / (cp1 + cp2 )
+            costs = 0
+            for n in neighbors:
+                h = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][n]
+                cn =  self.coarsened_graph.nodes[src_type].data["node_size"][n]
+                dn = self._get_degree_with_adj(n, None,etype )[n]
+                adj = self._get_adj(torch.tensor((n, n), device=self.device), torch.tensor((p1, p2), device=self.device), etype)
+                #   adj_2_n = self._get_adj(torch.tensor(p2), torch.tensor(n), etype)
+                feat_n = self.coarsened_graph.nodes[src_type].data["feat"][n]
+                sn = self.coarsened_graph.nodes[src_type].data[f's{etype}'][n]
+                h_prim = cn * feat_n / (cn + dn) 
+                h_prim += sn / torch.sqrt(cn+dn)
+                h_prim += ((adj[0] +adj[1]) * feat_p ) / torch.sqrt((dn + cn) * ( d1 + d2 + cp1 + cp2))
+                h_prim -= adj[0] * feat_1 / torch.sqrt((dn + cn) * ( d1 + cp1 ))
+                h_prim -= adj[1] * feat_2 / torch.sqrt((dn + cn) * (  d2 + cp2)) 
+                costs += torch.norm(h_prim - h, p=1)
+            costs_array.append(costs)
+        
+        
+        return costs_array
+
+    def neighbors_expensive(self, node1_ids, node2_ids, etype, etype_2, src_type):
+             #   costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
+        pairs = torch.stack((node1_ids, node2_ids), dim=1)
+        costs_array = []
+        neighbors,nodes  = self.coarsened_graph.in_edges(torch.cat((node1_ids,node2_ids)), etype=etype_2)
+        d1_wtf = self._get_degree_with_adj(node1_ids, None,etype )
+        d2_wtf = self._get_degree_with_adj(node2_ids, None,etype )
+            
+        for p1, p2 in tqdm(pairs):
+            d1 = d1_wtf[p1]
+            d2 = d2_wtf[p2]
+            mask1 = nodes == p1
+            mask2 = nodes == p2
+            mask = torch.logical_or(mask1, mask2)
+            neighbors_p = neighbors[mask]
+            mask1 = neighbors_p != p1
+            mask2 = neighbors_p != p2
+            mask = torch.logical_and(mask1, mask2)
+            neighbors_p = neighbors_p[mask]
+            if len(neighbors) == 0:
+                continue
+            cp1 = self.coarsened_graph.nodes[src_type].data["node_size"][p1]
+            cp2 = self.coarsened_graph.nodes[src_type].data["node_size"][p2]
+            feat_1 = self.coarsened_graph.nodes[src_type].data["feat"][p1]
+            feat_2 = self.coarsened_graph.nodes[src_type].data["feat"][p2]
+            feat_p = (cp1 * feat_1 + cp2 * feat_2) / (cp1 + cp2 )
+            costs = 0
+            
+            
+            
+            
+    
+            h = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][neighbors]
+            cn =  self.coarsened_graph.nodes[src_type].data["node_size"][neighbors]
+            dn = d1_wtf[neighbors].unsqueeze(1)
                 
-                
+            adj = self._get_adj(torch.cat((neighbors, neighbors)), torch.cat((p1.repeat(len(neighbors)), p2.repeat(len(neighbors)))), etype)
+                #   adj_2_n = self._get_adj(torch.tensor(p2), torch.tensor(n), etype)
+            feat_n = self.coarsened_graph.nodes[src_type].data["feat"][neighbors]
+            sn = self.coarsened_graph.nodes[src_type].data[f's{etype}'][neighbors]
+            h_prim = cn * feat_n / (cn + dn) 
+            h_prim += sn / torch.sqrt(cn+dn)
+            h_prim += ((adj[:(len(neighbors))] +adj[(len(neighbors)):]).unsqueeze(1) * feat_p ) / torch.sqrt((dn + cn) * ( d1 + d2 + cp1 + cp2))
+            h_prim -= (adj[:(len(neighbors))].unsqueeze(1) * feat_1) / torch.sqrt((dn + cn) * ( d1 + cp1 ))
+            h_prim -= (adj[(len(neighbors)):].unsqueeze(1) * feat_2) / torch.sqrt((dn + cn) * (  d2 + cp2)) 
+            costs += torch.norm(h_prim - h, p=1)
+            costs_array.append(costs)
+        
+        
+        return costs_array
+    
+        
+    def create_mapped_tensor(self,a, b, c, fill_value=float('nan')):
+        """
+        Create a tensor d where d[i,j] = c[k] if a[i] == b[k] and b[k] is the j-th unique value in b
+        
+        Parameters:
+        a: tensor-like, shape (n,)
+        b: tensor-like, shape (m,) 
+        c: tensor-like, shape (m,), same length as b
+        fill_value: value to use for missing combinations (default: nan)
+        
+        Returns:
+        d: tensor, shape (len(a), len(unique(b)))
+        """
+        a = torch.tensor(a, dtype=torch.float32, device=self.device)
+        b = torch.tensor(b, dtype=torch.float32, device=self.device)
+        c = torch.tensor(c, dtype=torch.float32, device=self.device)
+        
+        # Get unique values in b and their indices
+        unique_b, inverse_indices = torch.unique(b, return_inverse=True)
+        
+        # Create output tensor
+        d = torch.full((len(a), len(unique_b)), fill_value, dtype=torch.float32, device=self.device)
+        
+        # Create boolean mask: a[:, None] == b[None, :]
+        # This gives us a matrix where entry (i,j) is True if a[i] == b[j]
+        mask = a[:, None] == b[None, :]
+        
+        # For each position in a, find which positions in b match
+        # Then map those to the corresponding unique value indices
+        row_indices, col_indices_b = torch.where(mask)
+        col_indices_unique = inverse_indices[col_indices_b]
+        
+        # Fill the tensor with corresponding c values
+        d[row_indices, col_indices_unique] = c[col_indices_b]
+        
+        return d
+    
+    def index_matrix_with_nan_mask(self,d, lookup_matrix, fill_value=float('nan')):
+        """
+        Index into lookup_matrix using non-NaN values from d as indices
+        If lookup_matrix is 2D, returns the whole row for each index
+        
+        Parameters:
+        d: tensor with NaN and integer values, shape (H, W)
+        lookup_matrix: 1D tensor or 2D matrix, shape (N,) or (N, K)
+        fill_value: value to use where d has NaN
+        
+        Returns:
+        result: tensor shape (H, W, K) if lookup_matrix is 2D, or (H, W) if 1D
+        """
+        if lookup_matrix.dim() == 1:
+            # 1D lookup - same as before
+            mask = ~torch.isnan(d)
+            result = torch.full_like(d, fill_value, device=self.device)
+            indices = d[mask].long()
+            result[mask] = lookup_matrix[indices]
+            return result
+        
+        else:
+            # 2D lookup - return whole rows (memory efficient version)
+            H, W = d.shape
+            K = lookup_matrix.shape[1]
+            
+            # Create result tensor
+            result = torch.full((H, W, K), fill_value, device=self.device)
+            
+            # Find non-NaN positions
+            row_idx, col_idx = torch.where(~torch.isnan(d))
+            
+            # Get indices and lookup vectors
+            indices = d[row_idx, col_idx].long()
+            lookup_vectors = lookup_matrix[indices]  # Shape: (num_non_nan, K)
+            
+            # Assign directly using advanced indexing
+            result[row_idx, col_idx] = lookup_vectors
+            
+            return result
+    def neighbors_cheap(self, node1_ids, node2_ids, etype, etype_2, src_type):
+             #   costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
+        pairs = torch.stack((node1_ids, node2_ids), dim=1)
+        costs_array = []
+        pairs1 = node1_ids
+        pairs2 = node2_ids
+     #   pairs1 = torch.cat((pairs1,torch.tensor([6])) )
+        
+        #for p1, p2 in pairs:
+        all_neighbors,nodes  = self.coarsened_graph.in_edges(torch.unique(torch.cat((pairs1,pairs2))), etype=etype_2)
+        neighbors_1 = self.create_mapped_tensor(pairs1, nodes, all_neighbors)
+        neighbors_2 = self.create_mapped_tensor(pairs2, nodes, all_neighbors)
+        h_1 = self.index_matrix_with_nan_mask(neighbors_1, self.coarsened_graph.nodes[src_type].data[f"h{etype}"])
+        h_prim_1 = torch.zeros(h_1.shape, device=self.device)
+        s_1 = self.index_matrix_with_nan_mask(neighbors_1, self.coarsened_graph.nodes[src_type].data[f"s{etype}"])
+        f_1 = self.index_matrix_with_nan_mask(neighbors_1, self.coarsened_graph.nodes[src_type].data[f"feat"])
+        s_2 = self.index_matrix_with_nan_mask(neighbors_2, self.coarsened_graph.nodes[src_type].data[f"s{etype}"])
+        f_2 = self.index_matrix_with_nan_mask(neighbors_2, self.coarsened_graph.nodes[src_type].data[f"feat"])
+        
+        c1 = self.index_matrix_with_nan_mask(neighbors_1, self.coarsened_graph.nodes[src_type].data["node_size"])
+        deg = self._get_degree_with_adj(all_neighbors, None,etype )
+        deg1 = self.index_matrix_with_nan_mask(neighbors_1,deg).unsqueeze(2)
+        h_prim_1 += (c1 / (c1 + deg1)) * f_1
+        h_prim_1 += (c1 / torch.sqrt(c1 + deg1)) * s_1
+        
+        all_neighbors
+        mask1 = neighbors != pairs1
+        mask2 = neighbors != pairs2
+        mask = torch.logical_and(mask1, mask2)
+        neighbors = neighbors[mask]
+#        if len(neighbors) == 0:
+
+ #           continue
+        cp1 = self.coarsened_graph.nodes[src_type].data["node_size"][p1]
+        cp2 = self.coarsened_graph.nodes[src_type].data["node_size"][p2]
+        feat_1 = self.coarsened_graph.nodes[src_type].data["feat"][p1]
+        feat_2 = self.coarsened_graph.nodes[src_type].data["feat"][p2]
+        d1 = self._get_degree_with_adj(p1, None,etype )[p1]
+        d2 = self._get_degree_with_adj(p2, None,etype )[p2]
+        feat_p = (cp1 * feat_1 + cp2 * feat_2) / (cp1 + cp2 )
+        costs = 0
+        
+        
+        
+        
+
+        h = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][neighbors]
+        cn =  self.coarsened_graph.nodes[src_type].data["node_size"][neighbors]
+        dn = self._get_degree_with_adj(neighbors, None,etype )[neighbors].unsqueeze(1)
+            
+        adj = self._get_adj(torch.cat((neighbors, neighbors)), torch.cat((p1.repeat(len(neighbors)), p2.repeat(len(neighbors)))), etype)
+            #   adj_2_n = self._get_adj(torch.tensor(p2), torch.tensor(n), etype)
+        feat_n = self.coarsened_graph.nodes[src_type].data["feat"][neighbors]
+        sn = self.coarsened_graph.nodes[src_type].data[f's{etype}'][neighbors]
+        h_prim = cn * feat_n / (cn + dn) 
+        h_prim += sn / torch.sqrt(cn+dn)
+        h_prim += ((adj[:(len(neighbors))] +adj[(len(neighbors)):]).unsqueeze(1) * feat_p ) / torch.sqrt((dn + cn) * ( d1 + d2 + cp1 + cp2))
+        h_prim -= (adj[:(len(neighbors))].unsqueeze(1) * feat_1) / torch.sqrt((dn + cn) * ( d1 + cp1 ))
+        h_prim -= (adj[(len(neighbors)):].unsqueeze(1) * feat_2) / torch.sqrt((dn + cn) * (  d2 + cp2)) 
+        costs += torch.norm(h_prim - h, p=1)
+        costs_array.append(costs)
+    
+        
+        return costs_array
+
+    def vectorwise_isin(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # a: (n, d), b: (m, d)
+        # Return: (n,) boolean mask
+        a_exp = a.unsqueeze(1)        # (n, 1, d)
+        b_exp = b.unsqueeze(0)        # (1, m, d)
+        matches = (a_exp == b_exp).all(dim=2)  # (n, m)
+        return matches.any(dim=1)  
     
     def _neigbors_h_costs(self, merge_list):
         costs_dict = {}
@@ -1104,10 +1403,61 @@ class HeteroCoarsener(GraphSummarizer):
                     continue
                 if src_type not in costs_dict:
                     costs_dict[src_type] = {}
-             #   costs_dict[src_type].setdefault(etype, {})[etype_2] = {}
+                    
+              #  costs_array = self.neighbors_very_expensive(node1_ids, node2_ids, etype, etype_2, src_type)
+                costs_array_2 = self.neighbors_expensive(node1_ids, node2_ids, etype, etype_2, src_type)
+               # costs_array_3 = self.neighbors_cheap(node1_ids, node2_ids, etype, etype_2, src_type)
+                costs_dict[src_type][etype_2] = {
+                    "costs": torch.tensor(costs_array_2, device=self.device),
+                    "index": torch.stack([node1_ids, node2_ids], dim=0)
+                }
+                
+                # Get unique source nodes from all pairs
+                pairs_nodes = torch.cat([node1_ids, node2_ids])
+                pairs = torch.stack((node1_ids, node2_ids), dim=1)
+        
+                unique_srcs = torch.unique(pairs_nodes)
+                feat_u = self.coarsened_graph.nodes[src_type].data["feat"][node1_ids]
+                
+                # Get all out edges from coarsened graph
+                all_srcs, all_dsts = self.coarsened_graph.in_edges(unique_srcs, etype=etype_2)
+                max_degree = max(self.coarsened_graph.in_degrees(unique_srcs, etype=etype_2))
+                h_prim = torch.zeros((len(pairs),feat_u.shape[1],max_degree))
+                h = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][all_srcs]
                 
                 
-            
+                
+                # Repeat all_srcs and all_dsts for pairwise comparison
+                # pairs.shape = [num_pairs, 2]
+                p1s = pairs[:, 0]  # shape [num_pairs]
+                p2s = pairs[:, 1]  # shape [num_pairs]
+                
+
+                # [E] = number of edges, [P] = number of pairs
+                # shape: [P, E]
+                mask_src_in_p1p2 = (all_srcs.unsqueeze(0) == p1s.unsqueeze(1)) | (all_srcs.unsqueeze(0) == p2s.unsqueeze(1))
+
+                # shape: [P, E] - keep dsts not equal to p1 or p2
+                mask_dst_not_p1 = all_dsts.unsqueeze(0) != p1s.unsqueeze(1)
+                mask_dst_not_p2 = all_dsts.unsqueeze(0) != p2s.unsqueeze(1)
+                mask_dst_not_uv = mask_dst_not_p1 & mask_dst_not_p2
+
+                # Combine the two masks to get the final filter
+                final_mask = mask_src_in_p1p2 & mask_dst_not_uv  # shape [P, E]
+                self.coarsened_graph.nodes[src_type].data[f"s{etype}"]
+                
+                repeat_dst = all_dsts.repeat(len(p1s), 1)
+                
+                # Collect neighbors per pair
+                h = torch.where(final_mask.unsqueeze(2), self.coarsened_graph.nodes[src_type].data[f"h{etype}"][repeat_dst], False )
+                
+                #h = self.coarsened_graph.nodes[src_type].data[f"h{etype}"][neighbors_per_pair]
+                
+
+                
+                
+                
+               
                 
                 feat_u = self.coarsened_graph.nodes[src_type].data["feat"][node1_ids]
                 feat_v = self.coarsened_graph.nodes[src_type].data["feat"][node2_ids]
@@ -1123,42 +1473,120 @@ class HeteroCoarsener(GraphSummarizer):
                 
                 
                 
-                # neighbors_u_extra_costs = torch.norm( feat_uv / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat_u / (torch.sqrt(d1.unsqueeze(1) + c1)) , p=1, dim=1)
-                # neighbors_v_extra_costs = torch.norm( feat_uv / (torch.sqrt(d1.unsqueeze(1) + d2.unsqueeze(1) + c1 + c2))  - feat_v / (torch.sqrt(d2.unsqueeze(1) + c2)) , p=1, dim=1)
-            
+                deg = self._get_degree_with_adj(node1_ids, node2_ids,etype )
+                d_uv = deg[node1_ids] + deg[node2_ids]
+                c_uv = c1+ c2
+                nodes_u,neigbors_u  = self.coarsened_graph.in_edges(node1_ids, etype=etype_2)
+                nodes_v,neigbors_v  = self.coarsened_graph.in_edges(node2_ids, etype=etype_2)
                 
-                neigbors_u, nodes_u = self.coarsened_graph.out_edges(node1_ids, etype=etype_2)
-                neigbors_v, nodes_v = self.coarsened_graph.out_edges(node2_ids, etype=etype_2)
+                # a_pairs = torch.stack((node1_ids, node2_ids), dim=1)  # shape [N, 2]
+                # b_pairs = torch.stack((nodes_u, neigbors_u), dim=1)  # shape [M, 2]
                 
+                # # Find which b_pairs are in a_pairs
+                # mask = self.vectorwise_isin(b_pairs, a_pairs) == False
+
+                # # Apply mask
+                # nodes_u = nodes_u[mask]
+                # neigbors_u = neigbors_u[mask]      
+                
+                # b_pairs = torch.stack((nodes_v, neigbors_v), dim=1)  # shape [M, 2]
+
+                # # Find which b_pairs are in a_pairs
+                # mask = self.vectorwise_isin(b_pairs, a_pairs) == False
+
+                # # Apply mask
+                # nodes_v = nodes_v[mask]
+                # neigbors_v = neigbors_v[mask]        
+          
+        
                 nodes_uv = torch.cat([nodes_u, nodes_v])
                 neighbors = torch.cat([neigbors_u, neigbors_v])
                 hi_neigh = self.coarsened_graph.nodes[src_type].data[f'h{etype}'][neighbors] # TODO etype?
                 
                 feat_neigh = self.coarsened_graph.nodes[src_type].data[f'feat'][neighbors]
                 
-                c_uv =   self.coarsened_graph.nodes[src_type].data[f'node_size'][nodes_uv]
+               # c_uv =   self.coarsened_graph.nodes[src_type].data[f'node_size'][nodes_uv]
                 c_neigh = self.coarsened_graph.nodes[src_type].data[f'node_size'][neighbors]
                  
-                adj1_nei_u = self._get_adj(neigbors_u, nodes_u, etype)
-                adj1_nei_v = self._get_adj(neigbors_v, nodes_v, etype)
+                adj1_u_nei_u = self._get_adj(neigbors_u, nodes_u, etype)
+                adj1_v_nei_v = self._get_adj(neigbors_v, nodes_v, etype)
         
-                adj1_u_nei = self._get_adj(nodes_u, neigbors_u, etype)
-                adj1_v_nei = self._get_adj(nodes_v, neigbors_v, etype)
+                adj1_u_nei_u = self._get_adj(nodes_u, neigbors_u, etype)
+                adj1_v_nei_v = self._get_adj(nodes_v, neigbors_v, etype)
         
-
+                # adj1_u_nei_v = self._get_adj(nodes_u, neigbors_v, etype)
+                # adj1_v_nei_u = self._get_adj(nodes_v, neigbors_u, etype)
+        
                 
                 s_neigh = self.coarsened_graph.nodes[src_type].data[f"s{etype}"][neighbors]
                 
                 d_neigh = self._get_degree_with_adj(neighbors, None,etype )
                 deg_u = self._get_degree_with_adj(nodes_u, None,etype )
+                #deg_u.repeat()
                 deg_v = self._get_degree_with_adj(nodes_v, None,etype )
+                
+               # feat_u = self.coarsened_graph.nodes[src_type].data["feat"][nodes_u]
+                # feat_v = self.coarsened_graph.nodes[src_type].data["feat"][nodes_v]
+                
                # d_v = self._get_degree_with_adj(nodes_v, None,etype )
                 
-                h_u_prim = c_neigh / (d_neigh[neighbors].unsqueeze(1) + c_neigh )  * feat_neigh
-                h_u_prim += 1 / (torch.sqrt(d_neigh[neighbors]).unsqueeze(1) )*s_neigh
-                h_u_prim += (adj1_nei_u[neighbors] + adj1_nei_v[neighbors]) / torch.sqrt(((d_neigh[neighbors].unsqueeze(1) + c_neigh[neighbors]).squeeze() * ( deg_u[nodes_uv].unsqueeze(1) + deg_v[nodes_uv].unsqueeze(1)  + c_uv[nodes_uv] + c_uv[nodes_uv]).squeeze() ) )
-                h_u_prim -= adj1_u_nei[neighbors] / torch.sqrt(1)                 
-                edge_ids_u = self.coarsened_graph.edge_ids(neigbors_u, nodes_u, etype=etype_2)
+                hi_prim = c_neigh / (d_neigh[neighbors].unsqueeze(1) + c_neigh )  * feat_neigh
+                hi_prim += (1 / (torch.sqrt(d_neigh[neighbors].unsqueeze(1)  + c_neigh )))*s_neigh
+                
+                hi_prim[:len(nodes_u)] += ((adj1_u_nei_u ) * feat_uv[nodes_u].squeeze()).unsqueeze(1)  / torch.sqrt(((d_neigh[neigbors_u].unsqueeze(1) + c_neigh[neigbors_u]) *  (d_uv[nodes_u].unsqueeze(1)   + c_uv[nodes_u] )).squeeze()  ).unsqueeze(1)
+                hi_prim[len(nodes_u):] += ((adj1_v_nei_v ) * feat_uv[nodes_v].squeeze()).unsqueeze(1)/ torch.sqrt(((d_neigh[neigbors_v].unsqueeze(1) + c_neigh[neigbors_v]) *  (d_uv[nodes_v].unsqueeze(1)   + c_uv[nodes_v] )).squeeze()  ).unsqueeze(1)
+                
+               # hi_prim = 
+                
+                
+                hi_prim[:len(nodes_u)] -= (adj1_u_nei_u * feat_v[neigbors_v].squeeze()).unsqueeze(1) / torch.sqrt((d_neigh[neigbors_u].unsqueeze(1) + c_neigh[neigbors_u]) * (deg_u[nodes_u].unsqueeze(1) + c1[nodes_u]))
+                hi_prim[len(nodes_u):] -= (adj1_v_nei_v * feat_u[nodes_v].squeeze()).unsqueeze(1) / torch.sqrt((d_neigh[neigbors_v].unsqueeze(1) + c_neigh[neigbors_v]) * (deg_v[nodes_v].unsqueeze(1) + c2[nodes_v]))
+                
+                feat_u = self.coarsened_graph.nodes[src_type].data["feat"][nodes_u]
+                
+                hi_prim[:len(nodes_u)] -= (adj1_u_nei_v * feat_v[nodes_u].squeeze()).unsqueeze(1) / torch.sqrt((d_neigh[neigbors_u].unsqueeze(1) + c_neigh[neigbors_u]) * (deg_u[nodes_u].unsqueeze(1) + c1[nodes_u]))
+                hi_prim[len(nodes_u):] -= (adj1_v_nei_u * feat_v[nodes_v].squeeze()).unsqueeze(1) / torch.sqrt((d_neigh[neigbors_v].unsqueeze(1) + c_neigh[neigbors_v]) * (deg_v[nodes_v].unsqueeze(1) + c2[nodes_v]))
+                
+                
+                
+                distances = torch.norm(hi_prim - hi_neigh, p=1, dim=1)
+                distances_v = distances[len(nodes_u):]
+                distances_u = distances[:len(nodes_u)]
+                
+                
+                for n1, n2 in zip(node1_ids, node2_ids):
+                    cost = 0
+                    for nu, nei_u in zip(nodes_u,neigbors_u):
+                        if nu!=n1 and nei_u == n2:
+                            cost += distances_u[u]
+                    for nv, nei_v in zip(nodes_v,neigbors_v):
+                        if nv!=n2 and nei_v == n1:
+                            cost += distances_u[u]
+                        
+                    print(cost)
+                
+                
+                mask_1 = neigbors_u[node1_ids] != node2_ids
+                # Initialize mask with False
+                mask = torch.zeros_like(node2_ids, dtype=torch.bool)
+
+                # Find valid indices (i.e., node1[i] < len(nei))
+                valid = node2_ids < len(neigbors_v)
+
+                # Apply only on valid positions
+                mask[valid] = neigbors_v[node2_ids[valid]] != node1_ids[valid]
+                mask
+                #mask_2 = neigbors_u != node1_ids[nodes_u]
+                distances_u = torch.where(mask_1, distances_u[node1_ids], torch.tensor(0))
+                distances_v = torch.where(mask, distances_v[node2_ids[valid]], torch.tensor(0))
+                costs = torch.zeros(len(node1_ids), dtype=distances.dtype, device=self.device)
+                costs = distances
+                #costs.index_add_(0, nodes_u, distances[nodes_u] )
+                #costs.index_add_(0, nodes_v, distances[nodes_v] )
+                
+                #h_u_prim += (adj1_u_nei[nodes_uv] + adj1_v_nei[nodes_uv]) / 
+                #h_u_prim -= adj1_u_nei[neighbors] / torch.sqrt(1)                 
+                #edge_ids_u = self.coarsened_graph.edge_ids(neigbors_u, nodes_u, etype=etype_2)
                 edge_ids_v = self.coarsened_graph.edge_ids(neigbors_v, nodes_v, etype=etype_2)
                 
                 adj_u = self.coarsened_graph.edges[etype_2].data["adj"][edge_ids_u]
@@ -1394,12 +1822,12 @@ class HeteroCoarsener(GraphSummarizer):
 if __name__ == "__main__":
     tester = TestHomo()
     g = tester.g 
-    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=30, is_neighboring_h=True, is_adj=True,device="cpu"))
+    tester.run_test(HeteroCoarsener(None,g, 0.5, num_nearest_per_etype=2, num_nearest_neighbors=2,pairs_per_level=3, is_neighboring_h=False, is_adj=True,device="cpu"))
     dataset = Citeseer() 
     original_graph = dataset.load_graph()
 
     #original_graph = create_test_graph()
-    coarsener =  HeteroCoarsener(None,original_graph, 0.1, num_nearest_per_etype=30, num_nearest_neighbors=30,pairs_per_level=10, is_neighboring_h=True, is_adj=True) # 
+    coarsener =  HeteroCoarsener(None,original_graph, 0.1, num_nearest_per_etype=10, num_nearest_neighbors=10,pairs_per_level=3, is_neighboring_h=True, is_adj=True) # 
     coarsener.init_step()
     for i in range(3):
         print("--------- step: " , i , "---------" )
